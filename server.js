@@ -1,4 +1,4 @@
-// 1. Crash Guards (Prevents background errors from killing Express on Render)
+// 1. Crash Guards
 process.on('unhandledRejection', (reason, promise) => {
   console.error('[CRASH GUARD] Unhandled Rejection at:', promise, 'reason:', reason);
 });
@@ -7,12 +7,10 @@ process.on('uncaughtException', (err) => {
   console.error('[CRASH GUARD] Uncaught Exception thrown:', err);
 });
 
-// 2. Safe dotenv initialization
+// 2. Safe dotenv
 try {
   require('dotenv').config();
-} catch (e) {
-  // Gracefully ignored when environment variables are injected directly in production
-}
+} catch (e) {}
 
 const express = require('express');
 const multer = require('multer');
@@ -24,17 +22,13 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 const PORT = process.env.PORT || 3000;
 const TARGET_URL = process.env.TARGET_URL || 'https://rexify.com.ng?reference=sholaupdates';
-
 const mobileDevice = KnownDevices['iPhone 13 Pro'];
 
-// Global CORS Middleware
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
@@ -45,7 +39,6 @@ let sseClients = [];
 function sendLog(message, type = 'normal', done = false) {
   console.log(`[LOG] ${message}`);
   const payload = JSON.stringify({ message, type, done });
-  
   sseClients = sseClients.filter((client) => {
     try {
       client.res.write(`data: ${payload}\n\n`);
@@ -56,9 +49,8 @@ function sendLog(message, type = 'normal', done = false) {
   });
 }
 
-// Helpers
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const randomDelay = (min = 500, max = 1800) => 
+const randomDelay = (min = 100, max = 400) => 
   delay(Math.floor(Math.random() * (max - min + 1)) + min);
 
 function generateRandomEmail() {
@@ -70,7 +62,6 @@ function generateRandomPassword() {
   return `Pass!${Math.random().toString(36).slice(-8)}`;
 }
 
-// Ensure Page Guard
 function ensurePageAlive(page) {
   if (!page || page.isClosed()) {
     throw new Error('PAGE_CLOSED_OR_DETACHED');
@@ -78,7 +69,7 @@ function ensurePageAlive(page) {
 }
 
 // ---------------------------------------------------------
-// 3. SINGLETON BROWSER CONNECTION MANAGER
+// SINGLETON BROWSER CONNECTION MANAGER
 // ---------------------------------------------------------
 let globalBrowser = null;
 let isConnecting = false;
@@ -89,7 +80,7 @@ async function getBrowser() {
   }
 
   while (isConnecting) {
-    await delay(300);
+    await delay(200);
     if (globalBrowser && globalBrowser.isConnected()) return globalBrowser;
   }
 
@@ -107,7 +98,7 @@ async function getBrowser() {
       });
 
       globalBrowser.on('disconnected', () => {
-        sendLog('[BROWSER ENGINE] ⚠️ Browserless connection dropped! Engine will reconnect automatically.', 'warn');
+        sendLog('[BROWSER ENGINE] ⚠️ Browserless connection dropped!', 'warn');
         globalBrowser = null;
       });
 
@@ -116,14 +107,14 @@ async function getBrowser() {
       return globalBrowser;
     } catch (err) {
       const is429 = err.message && err.message.includes('429');
-      const waitMs = is429 ? attempts * 2000 : 1500;
-      sendLog(`[BROWSER ENGINE] Connection attempt failed (${err.message}). Retrying in ${waitMs / 1000}s...`, 'warn');
+      const waitMs = is429 ? attempts * 1500 : 1000;
+      sendLog(`[BROWSER ENGINE] Connection failed (${err.message}). Retrying in ${waitMs / 1000}s...`, 'warn');
       await delay(waitMs);
     }
   }
 
   isConnecting = false;
-  throw new Error('Could not establish a stable Browserless WebSocket connection.');
+  throw new Error('Could not establish Browserless connection.');
 }
 
 // SSE Logging Endpoint
@@ -135,7 +126,6 @@ app.get('/api/logs', (req, res) => {
   res.flushHeaders();
 
   res.write(': keep-alive\n\n');
-
   const clientId = Date.now();
   sseClients.push({ id: clientId, res });
 
@@ -146,9 +136,7 @@ app.get('/api/logs', (req, res) => {
 
 setInterval(() => {
   sseClients.forEach((client) => {
-    try {
-      client.res.write(': keep-alive\n\n');
-    } catch (err) {}
+    try { client.res.write(': keep-alive\n\n'); } catch (err) {}
   });
 }, 10000);
 
@@ -169,7 +157,7 @@ function parseCSVBuffer(buffer) {
 }
 
 // ---------------------------------------------------------
-// 4. AUTOMATION ENGINE (RUNS INSIDE A FRESH BROWSER CONTEXT)
+// TURBO AUTOMATION ENGINE
 // ---------------------------------------------------------
 async function runAccountWorkflow(page, context, row, rowIndex, workerId) {
   const bankName = row.bankName || 'OPay';
@@ -179,51 +167,50 @@ async function runAccountWorkflow(page, context, row, rowIndex, workerId) {
 
   sendLog(`[Worker ${workerId}] [Row ${rowIndex + 1}] Processing ${accountNumber} (${randomEmail})`, 'info');
 
+  // Resource Blocking Optimization (Block heavy media/css/fonts)
+  await page.setRequestInterception(true);
+  page.on('request', (req) => {
+    const resourceType = req.resourceType();
+    if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+      req.abort();
+    } else {
+      req.continue();
+    }
+  });
+
   await page.emulate(mobileDevice);
-  page.setDefaultTimeout(20000);
+  page.setDefaultTimeout(12000);
 
   // STEP 1: Landing Page
   ensurePageAlive(page);
-  await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 30000 });
-  await randomDelay(400, 800);
+  await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
   ensurePageAlive(page);
-  const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 12000 });
-  await Promise.all([
-    getStartedBtn.click(),
-    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
-  ]);
+  const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 10000 });
+  await getStartedBtn.click();
 
   const pages = await context.pages();
   if (pages.length > 1) {
     page = pages[pages.length - 1];
     await page.emulate(mobileDevice);
-    page.setDefaultTimeout(20000);
+    page.setDefaultTimeout(12000);
   }
 
-  await randomDelay(1000, 2000);
-
-  // STEP 2: Registration
+  // STEP 2: Fast Registration
   ensurePageAlive(page);
-  const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 12000 });
-  await emailSelector.type(randomEmail, { delay: 30 });
+  const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 10000 });
+  await emailSelector.type(randomEmail, { delay: 0 });
 
-  const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 10000 });
-  await passSelector.type(randomPassword, { delay: 30 });
+  const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 8000 });
+  await passSelector.type(randomPassword, { delay: 0 });
 
   const checkbox = await page.$('input[type="checkbox"]');
   if (checkbox) await checkbox.click();
 
-  const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 12000 });
-  await randomDelay(400, 800);
-  await Promise.all([
-    continueBtn.click(),
-    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
-  ]);
+  const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 10000 });
+  await continueBtn.click();
 
-  await randomDelay(2000, 3500);
-
-  // STEP 3: Withdrawal Setup & 7x Retry Verification Loop
+  // STEP 3: Withdrawal Setup & Fast Verification Loop
   let isVerified = false;
   let verifyAttempt = 0;
   const MAX_VERIFY_ATTEMPTS = 7;
@@ -233,11 +220,10 @@ async function runAccountWorkflow(page, context, row, rowIndex, workerId) {
     ensurePageAlive(page);
     sendLog(`[Worker ${workerId}] Verification attempt ${verifyAttempt}/${MAX_VERIFY_ATTEMPTS} for ${accountNumber}...`);
 
-    const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 12000 });
+    const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 10000 });
     await accountInput.click({ clickCount: 3 });
     await accountInput.press('Backspace');
-    await randomDelay(200, 400);
-    await accountInput.type(accountNumber, { delay: 30 });
+    await accountInput.type(accountNumber, { delay: 0 });
 
     try {
       await page.select('select', bankName);
@@ -258,15 +244,14 @@ async function runAccountWorkflow(page, context, row, rowIndex, workerId) {
       }, bankName);
     }
 
-    const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 12000 });
-    await randomDelay(300, 600);
+    const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 10000 });
     await verifyBtn.click();
 
-    // Fast DOM Polling (500ms intervals)
+    // Fast Polling Loop (250ms intervals)
     const startTime = Date.now();
     let status = 'pending';
 
-    while (Date.now() - startTime < 10000) {
+    while (Date.now() - startTime < 8000) {
       ensurePageAlive(page);
       const result = await page.evaluate(() => {
         const bodyText = document.body.innerText || '';
@@ -279,7 +264,7 @@ async function runAccountWorkflow(page, context, row, rowIndex, workerId) {
         status = result;
         break;
       }
-      await delay(500);
+      await delay(250);
     }
 
     if (status === 'success') {
@@ -287,7 +272,7 @@ async function runAccountWorkflow(page, context, row, rowIndex, workerId) {
       sendLog(`[Worker ${workerId}] Account verified successfully for ${accountNumber}!`, 'info');
     } else {
       sendLog(`[Worker ${workerId}] Verification returned '${status}' on attempt ${verifyAttempt}. Re-inputting...`, 'warn');
-      await randomDelay(1000, 2000);
+      await randomDelay(300, 600);
     }
   }
 
@@ -295,20 +280,19 @@ async function runAccountWorkflow(page, context, row, rowIndex, workerId) {
     throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
   }
 
-  // Finish & Continue
+  // Finish
   ensurePageAlive(page);
-  const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 12000 });
-  await randomDelay(500, 1000);
+  const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 10000 });
   await finishBtn.click();
 
-  sendLog(`[Worker ${workerId}] Clicked 'Finish & continue'. Stabilizing account (15s)...`);
-  await delay(15000);
+  sendLog(`[Worker ${workerId}] Clicked 'Finish & continue'. Finalizing...`);
+  await delay(2000); // Fast stabilization
 
   return true;
 }
 
 // ---------------------------------------------------------
-// 5. WORKER HANDLER WITH CONTEXT RETRY GUARD
+// WORKER HANDLER WITH CONTEXT RETRY GUARD
 // ---------------------------------------------------------
 async function processAccount(row, rowIndex, workerId) {
   const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
@@ -324,8 +308,7 @@ async function processAccount(row, rowIndex, workerId) {
       context = await browser.createBrowserContext();
       const page = await context.newPage();
 
-      const success = await runAccountWorkflow(page, context, row, rowIndex, workerId);
-      return success;
+      return await runAccountWorkflow(page, context, row, rowIndex, workerId);
 
     } catch (err) {
       const errMsg = err.message || '';
@@ -337,8 +320,8 @@ async function processAccount(row, rowIndex, workerId) {
         errMsg.includes('Execution context');
 
       if (isRecoverable && accountAttempts < MAX_ACCOUNT_ATTEMPTS) {
-        sendLog(`[Worker ${workerId}] Recoverable browser error for account ${accountNumber} (${errMsg}). Creating new Browser Context (Attempt ${accountAttempts}/${MAX_ACCOUNT_ATTEMPTS})...`, 'warn');
-        await delay(1500);
+        sendLog(`[Worker ${workerId}] Recoverable error for ${accountNumber} (${errMsg}). Re-spawning context (Attempt ${accountAttempts}/${MAX_ACCOUNT_ATTEMPTS})...`, 'warn');
+        await delay(500);
       } else {
         sendLog(`[Worker ${workerId}] Error on account ${accountNumber}: ${errMsg}`, 'error');
         return false;
@@ -354,7 +337,7 @@ async function processAccount(row, rowIndex, workerId) {
 }
 
 // ---------------------------------------------------------
-// 6. MAIN BATCH RUNNER
+// MAIN BATCH RUNNER
 // ---------------------------------------------------------
 app.post('/api/start', upload.single('csvFile'), async (req, res) => {
   try {
@@ -369,14 +352,13 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
 
     res.json({ success: true, count: accountRows.length });
 
-    sendLog(`Loaded ${accountRows.length} account row(s). Initializing resilient batch engine (5 workers/batch)...`, 'info');
+    sendLog(`Loaded ${accountRows.length} account row(s). Starting Turbo Batch Engine...`, 'info');
 
     if (!process.env.BROWSERLESS_WS) {
-      sendLog('ERROR: BROWSERLESS_WS environment variable is missing!', 'error', true);
+      sendLog('ERROR: BROWSERLESS_WS variable missing!', 'error', true);
       return;
     }
 
-    // Initialize global singleton connection
     await getBrowser().catch(() => {});
 
     (async () => {
@@ -392,12 +374,12 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
 
         sendLog(`--- STARTING BATCH ${batchNumber} (${currentBatch.length} accounts in parallel) ---`, 'info');
 
-        // Launch 5 workers with a 1.2s stagger to prevent initial CPU spikes
+        // Fast staggered start (300ms)
         const batchPromises = currentBatch.map(async (row, batchIdx) => {
           const workerId = batchIdx + 1;
           const rowIndex = i + batchIdx;
 
-          await delay(batchIdx * 1200);
+          await delay(batchIdx * 300);
 
           if (globalSuccesses >= TARGET_SUCCESSES) return false;
 
@@ -409,17 +391,16 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
           return success;
         });
 
-        // Hard await: Batch will not finish until all 5 workers complete or recover
         await Promise.all(batchPromises);
 
-        sendLog(`--- BATCH ${batchNumber} FINISHED. Total verified successes: ${globalSuccesses}/${TARGET_SUCCESSES} ---`, 'info');
+        sendLog(`--- BATCH ${batchNumber} FINISHED. Verified successes: ${globalSuccesses}/${TARGET_SUCCESSES} ---`, 'info');
 
         if (globalSuccesses >= TARGET_SUCCESSES) {
-          sendLog(`🎉 TARGET REACHED: Successfully created ${TARGET_SUCCESSES} accounts! Stopping execution engine.`, 'info', true);
+          sendLog(`🎉 TARGET REACHED: ${TARGET_SUCCESSES} accounts created!`, 'info', true);
           break;
         }
 
-        await delay(2000);
+        await delay(1000);
       }
 
       sendLog(`Execution complete. Final verified total: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
