@@ -114,28 +114,7 @@ function parseCSVBuffer(buffer) {
   });
 }
 
-// 5. Browser Instance Manager
-let browserInstance = null;
-
-async function getBrowser() {
-  if (browserInstance && browserInstance.isConnected()) {
-    return browserInstance;
-  }
-  
-  sendLog('Establishing Browserless WebSocket connection...', 'info');
-  browserInstance = await puppeteer.connect({
-    browserWSEndpoint: process.env.BROWSERLESS_WS,
-  });
-
-  browserInstance.on('disconnected', () => {
-    sendLog('Browserless connection dropped. Reconnect queued...', 'error');
-    browserInstance = null;
-  });
-
-  return browserInstance;
-}
-
-// Single Account Creation Handler
+// 5. Single Account Creation Handler with Isolated Connection
 async function processAccount(row, rowIndex, workerId) {
   const bankName = row.bankName || 'OPay';
   const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
@@ -144,10 +123,14 @@ async function processAccount(row, rowIndex, workerId) {
   const randomPassword = generateRandomPassword();
   sendLog(`[Worker ${workerId}] [Row ${rowIndex + 1}] Processing ${accountNumber} (${randomEmail})`, 'info');
 
-  let context = null;
+  let browser = null;
   try {
-    const browser = await getBrowser();
-    context = await browser.createBrowserContext();
+    // Dedicated Browserless connection per account prevents socket drops affecting other workers
+    browser = await puppeteer.connect({
+      browserWSEndpoint: process.env.BROWSERLESS_WS,
+    });
+
+    const context = await browser.createBrowserContext();
     let page = await context.newPage();
 
     await page.emulate(mobileDevice);
@@ -285,13 +268,13 @@ async function processAccount(row, rowIndex, workerId) {
     sendLog(`[Worker ${workerId}] Error on account ${accountNumber}: ${err.message}`, 'error');
     return false;
   } finally {
-    if (context) {
-      await context.close().catch(() => {});
+    if (browser) {
+      await browser.disconnect().catch(() => {});
     }
   }
 }
 
-// 6. Main Runner with Concurrency = 5 and Auto-Stop at 20 Successes
+// 6. Main Runner with Synchronous Batches of 5
 app.post('/api/start', upload.single('csvFile'), async (req, res) => {
   try {
     if (!req.file) {
@@ -305,54 +288,60 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
 
     res.json({ success: true, count: accountRows.length });
 
-    sendLog(`Loaded ${accountRows.length} account row(s). Starting execution pool...`, 'info');
+    sendLog(`Loaded ${accountRows.length} account row(s). Initializing batch engine (5 workers/batch)...`, 'info');
 
     if (!process.env.BROWSERLESS_WS) {
       sendLog('ERROR: BROWSERLESS_WS environment variable is missing!', 'error', true);
       return;
     }
 
-    // Concurrent Work Queue Engine
+    // Batch Execution Engine
     (async () => {
       let globalSuccesses = 0;
       const TARGET_SUCCESSES = 20;
-      const CONCURRENCY = 5;
+      const BATCH_SIZE = 5;
 
-      const queue = accountRows.map((row, index) => ({ row, index }));
+      for (let i = 0; i < accountRows.length; i += BATCH_SIZE) {
+        if (globalSuccesses >= TARGET_SUCCESSES) break;
 
-      const worker = async (workerId) => {
-        while (queue.length > 0 && globalSuccesses < TARGET_SUCCESSES) {
-          const item = queue.shift();
-          if (!item) break;
+        const currentBatch = accountRows.slice(i, i + BATCH_SIZE);
+        const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
 
-          const success = await processAccount(item.row, item.index, workerId);
+        sendLog(`--- STARTING BATCH ${batchNumber} (${currentBatch.length} accounts in parallel) ---`, 'info');
 
+        // Launch 5 workers with staggered starts within the batch
+        const batchPromises = currentBatch.map(async (row, batchIdx) => {
+          const workerId = batchIdx + 1;
+          const rowIndex = i + batchIdx;
+
+          // Stagger startup by 0.7s per worker to prevent HTTP 429 spike
+          await delay(batchIdx * 700);
+
+          if (globalSuccesses >= TARGET_SUCCESSES) return false;
+
+          const success = await processAccount(row, rowIndex, workerId);
           if (success) {
             globalSuccesses++;
-            sendLog(`SUCCESS (${globalSuccesses}/${TARGET_SUCCESSES}): Account row ${item.index + 1} completed!`, 'info');
-
-            if (globalSuccesses >= TARGET_SUCCESSES) {
-              sendLog(`🎉 TARGET REACHED: Successfully created ${TARGET_SUCCESSES} accounts! Stopping execution pool.`, 'info', true);
-              break;
-            }
-          } else {
-            sendLog(`Failed row ${item.index + 1}. Worker ${workerId} moving to next in queue...`, 'warn');
+            sendLog(`SUCCESS (${globalSuccesses}/${TARGET_SUCCESSES}): Row ${rowIndex + 1} completed!`, 'info');
           }
+          return success;
+        });
 
-          await randomDelay(1000, 2500);
+        // Await all 5 workers in the current batch before proceeding
+        await Promise.all(batchPromises);
+
+        sendLog(`--- BATCH ${batchNumber} FINISHED. Total verified successes: ${globalSuccesses}/${TARGET_SUCCESSES} ---`, 'info');
+
+        if (globalSuccesses >= TARGET_SUCCESSES) {
+          sendLog(`🎉 TARGET REACHED: Successfully created ${TARGET_SUCCESSES} accounts! Stopping execution engine.`, 'info', true);
+          break;
         }
-      };
 
-      // Launch 5 instances in parallel
-      const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
-      await Promise.all(workers);
+        // 3-second cooldown buffer between batches to let memory/sockets clear
+        await delay(3000);
+      }
 
       sendLog(`Execution batch completed. Total successes: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
-
-      if (browserInstance) {
-        await browserInstance.disconnect().catch(() => {});
-        browserInstance = null;
-      }
     })();
 
   } catch (err) {
