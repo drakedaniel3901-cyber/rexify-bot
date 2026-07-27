@@ -114,7 +114,7 @@ function parseCSVBuffer(buffer) {
   });
 }
 
-// 5. Single Account Creation Handler with Isolated Connection
+// 5. Single Account Creation Handler
 async function processAccount(row, rowIndex, workerId) {
   const bankName = row.bankName || 'OPay';
   const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
@@ -125,10 +125,27 @@ async function processAccount(row, rowIndex, workerId) {
 
   let browser = null;
   try {
-    // Dedicated Browserless connection per account prevents socket drops affecting other workers
-    browser = await puppeteer.connect({
-      browserWSEndpoint: process.env.BROWSERLESS_WS,
-    });
+    // 3-Attempt Retry Loop on HTTP 429 Rate Limits
+    let connectAttempts = 0;
+    const MAX_CONNECT_ATTEMPTS = 3;
+
+    while (!browser && connectAttempts < MAX_CONNECT_ATTEMPTS) {
+      connectAttempts++;
+      try {
+        browser = await puppeteer.connect({
+          browserWSEndpoint: process.env.BROWSERLESS_WS,
+        });
+      } catch (connErr) {
+        const is429 = connErr.message && connErr.message.includes('429');
+        if (is429 && connectAttempts < MAX_CONNECT_ATTEMPTS) {
+          const backoffMs = connectAttempts * 2000;
+          sendLog(`[Worker ${workerId}] Browserless rate-limited (429). Retrying connection in ${backoffMs / 1000}s (Attempt ${connectAttempts}/${MAX_CONNECT_ATTEMPTS})...`, 'warn');
+          await delay(backoffMs);
+        } else {
+          throw connErr;
+        }
+      }
+    }
 
     const context = await browser.createBrowserContext();
     let page = await context.newPage();
@@ -177,7 +194,7 @@ async function processAccount(row, rowIndex, workerId) {
 
     await randomDelay(3000, 5000);
 
-    // STEP 3: Withdrawal Setup & 7x Retry Verification Loop
+    // STEP 3: Withdrawal Setup & 7x Retry Verification Loop with Inner Guard
     let isVerified = false;
     let verifyAttempt = 0;
     const MAX_VERIFY_ATTEMPTS = 7;
@@ -186,66 +203,71 @@ async function processAccount(row, rowIndex, workerId) {
       verifyAttempt++;
       sendLog(`[Worker ${workerId}] Verification attempt ${verifyAttempt}/${MAX_VERIFY_ATTEMPTS} for ${accountNumber}...`);
 
-      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 15000 });
-      
-      // Clear input field cleanly
-      await accountInput.click({ clickCount: 3 });
-      await accountInput.press('Backspace');
-      await randomDelay(300, 600);
-      await accountInput.type(accountNumber, { delay: 50 });
-
-      // Select Bank
       try {
-        await page.select('select', bankName);
-      } catch (e) {
-        await page.evaluate((bName) => {
-          const select = document.querySelector('select');
-          if (!select) return;
-          for (let option of select.options) {
-            if (
-              option.text.toLowerCase().includes(bName.toLowerCase()) ||
-              option.value.toLowerCase().includes(bName.toLowerCase())
-            ) {
-              select.value = option.value;
-              select.dispatchEvent(new Event('change', { bubbles: true }));
-              break;
+        const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 15000 });
+        
+        // Clear input field cleanly
+        await accountInput.click({ clickCount: 3 });
+        await accountInput.press('Backspace');
+        await randomDelay(300, 600);
+        await accountInput.type(accountNumber, { delay: 50 });
+
+        // Select Bank
+        try {
+          await page.select('select', bankName);
+        } catch (e) {
+          await page.evaluate((bName) => {
+            const select = document.querySelector('select');
+            if (!select) return;
+            for (let option of select.options) {
+              if (
+                option.text.toLowerCase().includes(bName.toLowerCase()) ||
+                option.value.toLowerCase().includes(bName.toLowerCase())
+              ) {
+                select.value = option.value;
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+                break;
+              }
             }
-          }
-        }, bankName);
-      }
-
-      const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 15000 });
-      await randomDelay(500, 1000);
-      await verifyBtn.click();
-
-      // Poll DOM state for up to 12 seconds
-      const startTime = Date.now();
-      let status = 'pending';
-
-      while (Date.now() - startTime < 12000) {
-        const result = await page.evaluate(() => {
-          const bodyText = document.body.innerText || '';
-          if (bodyText.includes('Account name') || bodyText.includes('Verified')) {
-            return 'success';
-          }
-          if (bodyText.includes('Not verified') || bodyText.includes('Could not verify')) {
-            return 'failed';
-          }
-          return 'pending';
-        });
-
-        if (result !== 'pending') {
-          status = result;
-          break;
+          }, bankName);
         }
-        await delay(1000);
-      }
 
-      if (status === 'success') {
-        isVerified = true;
-        sendLog(`[Worker ${workerId}] Account verified successfully for ${accountNumber}!`, 'info');
-      } else {
-        sendLog(`[Worker ${workerId}] Verification returned '${status}' on attempt ${verifyAttempt}. Re-inputting...`, 'warn');
+        const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 15000 });
+        await randomDelay(500, 1000);
+        await verifyBtn.click();
+
+        // Poll DOM state for up to 12 seconds
+        const startTime = Date.now();
+        let status = 'pending';
+
+        while (Date.now() - startTime < 12000) {
+          const result = await page.evaluate(() => {
+            const bodyText = document.body.innerText || '';
+            if (bodyText.includes('Account name') || bodyText.includes('Verified')) {
+              return 'success';
+            }
+            if (bodyText.includes('Not verified') || bodyText.includes('Could not verify')) {
+              return 'failed';
+            }
+            return 'pending';
+          });
+
+          if (result !== 'pending') {
+            status = result;
+            break;
+          }
+          await delay(1000);
+        }
+
+        if (status === 'success') {
+          isVerified = true;
+          sendLog(`[Worker ${workerId}] Account verified successfully for ${accountNumber}!`, 'info');
+        } else {
+          sendLog(`[Worker ${workerId}] Verification returned '${status}' on attempt ${verifyAttempt}. Re-inputting...`, 'warn');
+          await randomDelay(1500, 3000);
+        }
+      } catch (attemptErr) {
+        sendLog(`[Worker ${workerId}] Transient error on verification attempt ${verifyAttempt}: ${attemptErr.message}. Continuing retry loop...`, 'warn');
         await randomDelay(1500, 3000);
       }
     }
@@ -309,12 +331,11 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
 
         sendLog(`--- STARTING BATCH ${batchNumber} (${currentBatch.length} accounts in parallel) ---`, 'info');
 
-        // Launch 5 workers with staggered starts within the batch
+        // Launch 5 workers with 0.7s staggered starts
         const batchPromises = currentBatch.map(async (row, batchIdx) => {
           const workerId = batchIdx + 1;
           const rowIndex = i + batchIdx;
 
-          // Stagger startup by 0.7s per worker to prevent HTTP 429 spike
           await delay(batchIdx * 700);
 
           if (globalSuccesses >= TARGET_SUCCESSES) return false;
@@ -337,7 +358,7 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
           break;
         }
 
-        // 3-second cooldown buffer between batches to let memory/sockets clear
+        // 3-second cooldown buffer between batches
         await delay(3000);
       }
 
