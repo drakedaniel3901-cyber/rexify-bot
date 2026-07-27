@@ -36,10 +36,7 @@ function sendLog(message, type = 'normal', done = false) {
   });
 }
 
-// Dynamic delay helpers
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const randomDelay = (min = 1000, max = 3000) => 
-  delay(Math.floor(Math.random() * (max - min + 1)) + min);
 
 function generateRandomEmail() {
   const randStr = Math.random().toString(36).substring(2, 8);
@@ -50,12 +47,10 @@ function generateRandomPassword() {
   return `Pass!${Math.random().toString(36).slice(-8)}`;
 }
 
-// SSE Logging Endpoint with Heartbeat Ping
 app.get('/api/logs', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Prevents Render/Nginx from buffering SSE output
   res.flushHeaders();
 
   const clientId = Date.now();
@@ -65,17 +60,6 @@ app.get('/api/logs', (req, res) => {
     sseClients = sseClients.filter((client) => client.id !== clientId);
   });
 });
-
-// Periodic Ping Interval (Keeps connection alive every 10s during long pauses)
-setInterval(() => {
-  sseClients.forEach((client) => {
-    try {
-      client.res.write(': keep-alive\n\n');
-    } catch (err) {
-      // Handled cleanly on connection close
-    }
-  });
-}, 10000);
 
 function parseCSVBuffer(buffer) {
   const content = buffer.toString('utf-8');
@@ -141,10 +125,10 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
     let attempt = 0;
     const maxRetries = 2;
 
+    // Retry loop for sign up or account page errors (up to 2 fallback retries)
     while (!success && attempt <= maxRetries) {
       if (attempt > 0) {
         sendLog(`Retrying row ${i + 1} (${accountNumber}) - Attempt ${attempt} of ${maxRetries}...`, 'warn');
-        await randomDelay(3000, 5000);
       } else {
         sendLog(`--- Processing ${i + 1}/${accountRows.length} ---`, 'info');
       }
@@ -160,61 +144,51 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
         let page = await context.newPage();
 
         await page.emulate(mobileDevice);
-        page.setDefaultTimeout(25000);
 
         // STEP 1: Landing Page
         sendLog(`Navigating to target URL in mobile view...`);
-        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 35000 });
-        await randomDelay(1500, 3000);
+        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 30000 });
 
-        const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 15000 });
-        await randomDelay(800, 1500);
+        const getStartedBtn = await page.waitForSelector('text/Get started', { timeout: 15000 });
         await Promise.all([
           getStartedBtn.click(),
-          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
         ]);
 
         const pages = await context.pages();
         if (pages.length > 1) {
           page = pages[pages.length - 1];
           await page.emulate(mobileDevice);
-          page.setDefaultTimeout(25000);
         }
 
         sendLog(`Clicked 'Get started'. Current URL: ${page.url()}`);
-        await randomDelay(2000, 4000);
+        await delay(2000);
 
         // STEP 2: Registration
         sendLog(`Filling signup form with generated credentials...`);
         
-        const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 15000 });
-        await randomDelay(400, 800);
-        await emailSelector.type(randomEmail, { delay: 60 });
+        const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { timeout: 15000 });
+        await emailSelector.type(randomEmail, { delay: 40 });
 
-        const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 10000 });
-        await randomDelay(400, 800);
-        await passSelector.type(randomPassword, { delay: 60 });
+        const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { timeout: 10000 });
+        await passSelector.type(randomPassword, { delay: 40 });
 
         const checkbox = await page.$('input[type="checkbox"]');
-        if (checkbox) {
-          await randomDelay(300, 600);
-          await checkbox.click();
-        }
+        if (checkbox) await checkbox.click();
 
-        const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 15000 });
-        await randomDelay(800, 1500);
+        const continueBtn = await page.waitForSelector('text/Continue', { timeout: 15000 });
         await Promise.all([
           continueBtn.click(),
-          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
         ]);
 
-        sendLog(`Clicked 'Continue'. Waiting for account form...`);
-        await randomDelay(4000, 6000);
+        sendLog(`Clicked 'Continue'. Pausing 5s...`);
+        await delay(5000);
 
         // STEP 3: Setup Withdrawals
         sendLog(`Applying mapped Bank (${bankName}) & Account Number (${accountNumber})...`);
         
-        await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 20000 });
+        await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { timeout: 15000 });
 
         try {
           await page.select('select', bankName);
@@ -235,21 +209,19 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
           }, bankName);
         }
 
-        await randomDelay(500, 1000);
-        const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 5000 });
-        await accountInput.type(accountNumber, { delay: 60 });
+        const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { timeout: 5000 });
+        await accountInput.type(accountNumber, { delay: 40 });
 
-        const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 15000 });
-        await randomDelay(800, 1500);
+        const verifyBtn = await page.waitForSelector('text/Verify account', { timeout: 15000 });
         await verifyBtn.click();
-        sendLog(`Clicked 'Verify account'. Pausing for API verification...`);
-        await randomDelay(8000, 10000);
+        sendLog(`Clicked 'Verify account'. Pausing 8s for API verification...`);
+        await delay(8000);
 
-        const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 15000 });
-        await randomDelay(800, 1500);
+        const finishBtn = await page.waitForSelector('text/Finish & continue', { timeout: 15000 });
         await finishBtn.click();
         
-        sendLog(`Clicked 'Finish & continue'. Stabilizing new account...`);
+        // Increased timer to 15sec after finishing/new account setup
+        sendLog(`Clicked 'Finish & continue'. Pausing 15s for new account stabilization...`);
         await delay(15000);
 
         sendLog(`Successfully finished account setup for: ${accountNumber}`, 'info');
@@ -266,11 +238,6 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
           await context.close().catch(() => {});
         }
       }
-    }
-
-    if (i < accountRows.length - 1) {
-      sendLog(`Cooling down before starting next row...`);
-      await randomDelay(3000, 6000);
     }
   }
 
