@@ -27,7 +27,7 @@ const TARGET_URL = process.env.TARGET_URL || 'https://rexify.com.ng?reference=sh
 
 const mobileDevice = KnownDevices['iPhone 13 Pro'];
 
-// 3. Global CORS Middleware
+// Global CORS Middleware
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -56,9 +56,9 @@ function sendLog(message, type = 'normal', done = false) {
   });
 }
 
-// Dynamic delay helpers
+// Helpers
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const randomDelay = (min = 1000, max = 3000) => 
+const randomDelay = (min = 500, max = 1800) => 
   delay(Math.floor(Math.random() * (max - min + 1)) + min);
 
 function generateRandomEmail() {
@@ -70,7 +70,63 @@ function generateRandomPassword() {
   return `Pass!${Math.random().toString(36).slice(-8)}`;
 }
 
-// 4. Server-Sent Events (SSE) Endpoint with Heartbeat Ping
+// Ensure Page Guard
+function ensurePageAlive(page) {
+  if (!page || page.isClosed()) {
+    throw new Error('PAGE_CLOSED_OR_DETACHED');
+  }
+}
+
+// ---------------------------------------------------------
+// 3. SINGLETON BROWSER CONNECTION MANAGER
+// ---------------------------------------------------------
+let globalBrowser = null;
+let isConnecting = false;
+
+async function getBrowser() {
+  if (globalBrowser && globalBrowser.isConnected()) {
+    return globalBrowser;
+  }
+
+  while (isConnecting) {
+    await delay(300);
+    if (globalBrowser && globalBrowser.isConnected()) return globalBrowser;
+  }
+
+  isConnecting = true;
+  let attempts = 0;
+  const MAX_ATTEMPTS = 5;
+
+  while (attempts < MAX_ATTEMPTS) {
+    attempts++;
+    try {
+      sendLog(`[BROWSER ENGINE] Connecting to Browserless (Attempt ${attempts}/${MAX_ATTEMPTS})...`, 'info');
+      
+      globalBrowser = await puppeteer.connect({
+        browserWSEndpoint: process.env.BROWSERLESS_WS,
+      });
+
+      globalBrowser.on('disconnected', () => {
+        sendLog('[BROWSER ENGINE] ⚠️ Browserless connection dropped! Engine will reconnect automatically.', 'warn');
+        globalBrowser = null;
+      });
+
+      sendLog('[BROWSER ENGINE] Connected successfully to Browserless!', 'info');
+      isConnecting = false;
+      return globalBrowser;
+    } catch (err) {
+      const is429 = err.message && err.message.includes('429');
+      const waitMs = is429 ? attempts * 2000 : 1500;
+      sendLog(`[BROWSER ENGINE] Connection attempt failed (${err.message}). Retrying in ${waitMs / 1000}s...`, 'warn');
+      await delay(waitMs);
+    }
+  }
+
+  isConnecting = false;
+  throw new Error('Could not establish a stable Browserless WebSocket connection.');
+}
+
+// SSE Logging Endpoint
 app.get('/api/logs', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -92,9 +148,7 @@ setInterval(() => {
   sseClients.forEach((client) => {
     try {
       client.res.write(': keep-alive\n\n');
-    } catch (err) {
-      // Cleaned up on disconnect
-    }
+    } catch (err) {}
   });
 }, 10000);
 
@@ -114,184 +168,194 @@ function parseCSVBuffer(buffer) {
   });
 }
 
-// 5. Browser Instance Manager
-let browserInstance = null;
-
-async function getBrowser() {
-  if (browserInstance && browserInstance.isConnected()) {
-    return browserInstance;
-  }
-  
-  sendLog('Establishing Browserless WebSocket connection...', 'info');
-  browserInstance = await puppeteer.connect({
-    browserWSEndpoint: process.env.BROWSERLESS_WS,
-  });
-
-  browserInstance.on('disconnected', () => {
-    sendLog('Browserless connection dropped. Reconnect queued...', 'error');
-    browserInstance = null;
-  });
-
-  return browserInstance;
-}
-
-// Single Account Creation Handler
-async function processAccount(row, rowIndex, workerId) {
+// ---------------------------------------------------------
+// 4. AUTOMATION ENGINE (RUNS INSIDE A FRESH BROWSER CONTEXT)
+// ---------------------------------------------------------
+async function runAccountWorkflow(page, context, row, rowIndex, workerId) {
   const bankName = row.bankName || 'OPay';
   const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
-
   const randomEmail = generateRandomEmail();
   const randomPassword = generateRandomPassword();
+
   sendLog(`[Worker ${workerId}] [Row ${rowIndex + 1}] Processing ${accountNumber} (${randomEmail})`, 'info');
 
-  let context = null;
-  try {
-    const browser = await getBrowser();
-    context = await browser.createBrowserContext();
-    let page = await context.newPage();
+  await page.emulate(mobileDevice);
+  page.setDefaultTimeout(20000);
 
+  // STEP 1: Landing Page
+  ensurePageAlive(page);
+  await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+  await randomDelay(400, 800);
+
+  ensurePageAlive(page);
+  const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 12000 });
+  await Promise.all([
+    getStartedBtn.click(),
+    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
+  ]);
+
+  const pages = await context.pages();
+  if (pages.length > 1) {
+    page = pages[pages.length - 1];
     await page.emulate(mobileDevice);
-    page.setDefaultTimeout(25000);
+    page.setDefaultTimeout(20000);
+  }
 
-    // STEP 1: Landing Page
-    await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 35000 });
-    await randomDelay(1000, 2000);
+  await randomDelay(1000, 2000);
 
-    const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 15000 });
-    await randomDelay(500, 1000);
-    await Promise.all([
-      getStartedBtn.click(),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
-    ]);
+  // STEP 2: Registration
+  ensurePageAlive(page);
+  const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 12000 });
+  await emailSelector.type(randomEmail, { delay: 30 });
 
-    const pages = await context.pages();
-    if (pages.length > 1) {
-      page = pages[pages.length - 1];
-      await page.emulate(mobileDevice);
-      page.setDefaultTimeout(25000);
-    }
+  const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 10000 });
+  await passSelector.type(randomPassword, { delay: 30 });
 
-    await randomDelay(1500, 3000);
+  const checkbox = await page.$('input[type="checkbox"]');
+  if (checkbox) await checkbox.click();
 
-    // STEP 2: Registration
-    const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 15000 });
-    await emailSelector.type(randomEmail, { delay: 50 });
+  const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 12000 });
+  await randomDelay(400, 800);
+  await Promise.all([
+    continueBtn.click(),
+    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
+  ]);
 
-    const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 10000 });
-    await passSelector.type(randomPassword, { delay: 50 });
+  await randomDelay(2000, 3500);
 
-    const checkbox = await page.$('input[type="checkbox"]');
-    if (checkbox) {
-      await checkbox.click();
-    }
+  // STEP 3: Withdrawal Setup & 7x Retry Verification Loop
+  let isVerified = false;
+  let verifyAttempt = 0;
+  const MAX_VERIFY_ATTEMPTS = 7;
 
-    const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 15000 });
-    await randomDelay(600, 1200);
-    await Promise.all([
-      continueBtn.click(),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
-    ]);
+  while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
+    verifyAttempt++;
+    ensurePageAlive(page);
+    sendLog(`[Worker ${workerId}] Verification attempt ${verifyAttempt}/${MAX_VERIFY_ATTEMPTS} for ${accountNumber}...`);
 
-    await randomDelay(3000, 5000);
+    const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 12000 });
+    await accountInput.click({ clickCount: 3 });
+    await accountInput.press('Backspace');
+    await randomDelay(200, 400);
+    await accountInput.type(accountNumber, { delay: 30 });
 
-    // STEP 3: Withdrawal Setup & 7x Retry Verification Loop
-    let isVerified = false;
-    let verifyAttempt = 0;
-    const MAX_VERIFY_ATTEMPTS = 7;
-
-    while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
-      verifyAttempt++;
-      sendLog(`[Worker ${workerId}] Verification attempt ${verifyAttempt}/${MAX_VERIFY_ATTEMPTS} for ${accountNumber}...`);
-
-      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 15000 });
-      
-      // Clear input field cleanly
-      await accountInput.click({ clickCount: 3 });
-      await accountInput.press('Backspace');
-      await randomDelay(300, 600);
-      await accountInput.type(accountNumber, { delay: 50 });
-
-      // Select Bank
-      try {
-        await page.select('select', bankName);
-      } catch (e) {
-        await page.evaluate((bName) => {
-          const select = document.querySelector('select');
-          if (!select) return;
-          for (let option of select.options) {
-            if (
-              option.text.toLowerCase().includes(bName.toLowerCase()) ||
-              option.value.toLowerCase().includes(bName.toLowerCase())
-            ) {
-              select.value = option.value;
-              select.dispatchEvent(new Event('change', { bubbles: true }));
-              break;
-            }
+    try {
+      await page.select('select', bankName);
+    } catch (e) {
+      await page.evaluate((bName) => {
+        const select = document.querySelector('select');
+        if (!select) return;
+        for (let option of select.options) {
+          if (
+            option.text.toLowerCase().includes(bName.toLowerCase()) ||
+            option.value.toLowerCase().includes(bName.toLowerCase())
+          ) {
+            select.value = option.value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            break;
           }
-        }, bankName);
-      }
-
-      const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 15000 });
-      await randomDelay(500, 1000);
-      await verifyBtn.click();
-
-      // Poll DOM state for up to 12 seconds
-      const startTime = Date.now();
-      let status = 'pending';
-
-      while (Date.now() - startTime < 12000) {
-        const result = await page.evaluate(() => {
-          const bodyText = document.body.innerText || '';
-          if (bodyText.includes('Account name') || bodyText.includes('Verified')) {
-            return 'success';
-          }
-          if (bodyText.includes('Not verified') || bodyText.includes('Could not verify')) {
-            return 'failed';
-          }
-          return 'pending';
-        });
-
-        if (result !== 'pending') {
-          status = result;
-          break;
         }
-        await delay(1000);
-      }
-
-      if (status === 'success') {
-        isVerified = true;
-        sendLog(`[Worker ${workerId}] Account verified successfully for ${accountNumber}!`, 'info');
-      } else {
-        sendLog(`[Worker ${workerId}] Verification returned '${status}' on attempt ${verifyAttempt}. Re-inputting...`, 'warn');
-        await randomDelay(1500, 3000);
-      }
+      }, bankName);
     }
 
-    if (!isVerified) {
-      throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
+    const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 12000 });
+    await randomDelay(300, 600);
+    await verifyBtn.click();
+
+    // Fast DOM Polling (500ms intervals)
+    const startTime = Date.now();
+    let status = 'pending';
+
+    while (Date.now() - startTime < 10000) {
+      ensurePageAlive(page);
+      const result = await page.evaluate(() => {
+        const bodyText = document.body.innerText || '';
+        if (bodyText.includes('Account name') || bodyText.includes('Verified')) return 'success';
+        if (bodyText.includes('Not verified') || bodyText.includes('Could not verify')) return 'failed';
+        return 'pending';
+      });
+
+      if (result !== 'pending') {
+        status = result;
+        break;
+      }
+      await delay(500);
     }
 
-    // Finish & Continue
-    const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 15000 });
-    await randomDelay(800, 1500);
-    await finishBtn.click();
-
-    sendLog(`[Worker ${workerId}] Clicked 'Finish & continue'. Stabilizing account (15s)...`);
-    await delay(15000);
-
-    return true;
-
-  } catch (err) {
-    sendLog(`[Worker ${workerId}] Error on account ${accountNumber}: ${err.message}`, 'error');
-    return false;
-  } finally {
-    if (context) {
-      await context.close().catch(() => {});
+    if (status === 'success') {
+      isVerified = true;
+      sendLog(`[Worker ${workerId}] Account verified successfully for ${accountNumber}!`, 'info');
+    } else {
+      sendLog(`[Worker ${workerId}] Verification returned '${status}' on attempt ${verifyAttempt}. Re-inputting...`, 'warn');
+      await randomDelay(1000, 2000);
     }
   }
+
+  if (!isVerified) {
+    throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
+  }
+
+  // Finish & Continue
+  ensurePageAlive(page);
+  const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 12000 });
+  await randomDelay(500, 1000);
+  await finishBtn.click();
+
+  sendLog(`[Worker ${workerId}] Clicked 'Finish & continue'. Stabilizing account (15s)...`);
+  await delay(15000);
+
+  return true;
 }
 
-// 6. Main Runner with Concurrency = 5 and Auto-Stop at 20 Successes
+// ---------------------------------------------------------
+// 5. WORKER HANDLER WITH CONTEXT RETRY GUARD
+// ---------------------------------------------------------
+async function processAccount(row, rowIndex, workerId) {
+  const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
+  let accountAttempts = 0;
+  const MAX_ACCOUNT_ATTEMPTS = 3;
+
+  while (accountAttempts < MAX_ACCOUNT_ATTEMPTS) {
+    accountAttempts++;
+    let context = null;
+
+    try {
+      const browser = await getBrowser();
+      context = await browser.createBrowserContext();
+      const page = await context.newPage();
+
+      const success = await runAccountWorkflow(page, context, row, rowIndex, workerId);
+      return success;
+
+    } catch (err) {
+      const errMsg = err.message || '';
+      const isRecoverable = 
+        errMsg.includes('detached') || 
+        errMsg.includes('Target closed') || 
+        errMsg.includes('Protocol error') || 
+        errMsg.includes('PAGE_CLOSED') ||
+        errMsg.includes('Execution context');
+
+      if (isRecoverable && accountAttempts < MAX_ACCOUNT_ATTEMPTS) {
+        sendLog(`[Worker ${workerId}] Recoverable browser error for account ${accountNumber} (${errMsg}). Creating new Browser Context (Attempt ${accountAttempts}/${MAX_ACCOUNT_ATTEMPTS})...`, 'warn');
+        await delay(1500);
+      } else {
+        sendLog(`[Worker ${workerId}] Error on account ${accountNumber}: ${errMsg}`, 'error');
+        return false;
+      }
+    } finally {
+      if (context) {
+        await context.close().catch(() => {});
+      }
+    }
+  }
+
+  return false;
+}
+
+// ---------------------------------------------------------
+// 6. MAIN BATCH RUNNER
+// ---------------------------------------------------------
 app.post('/api/start', upload.single('csvFile'), async (req, res) => {
   try {
     if (!req.file) {
@@ -305,54 +369,60 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
 
     res.json({ success: true, count: accountRows.length });
 
-    sendLog(`Loaded ${accountRows.length} account row(s). Starting execution pool...`, 'info');
+    sendLog(`Loaded ${accountRows.length} account row(s). Initializing resilient batch engine (5 workers/batch)...`, 'info');
 
     if (!process.env.BROWSERLESS_WS) {
       sendLog('ERROR: BROWSERLESS_WS environment variable is missing!', 'error', true);
       return;
     }
 
-    // Concurrent Work Queue Engine
+    // Initialize global singleton connection
+    await getBrowser().catch(() => {});
+
     (async () => {
       let globalSuccesses = 0;
       const TARGET_SUCCESSES = 20;
-      const CONCURRENCY = 5;
+      const BATCH_SIZE = 5;
 
-      const queue = accountRows.map((row, index) => ({ row, index }));
+      for (let i = 0; i < accountRows.length; i += BATCH_SIZE) {
+        if (globalSuccesses >= TARGET_SUCCESSES) break;
 
-      const worker = async (workerId) => {
-        while (queue.length > 0 && globalSuccesses < TARGET_SUCCESSES) {
-          const item = queue.shift();
-          if (!item) break;
+        const currentBatch = accountRows.slice(i, i + BATCH_SIZE);
+        const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
 
-          const success = await processAccount(item.row, item.index, workerId);
+        sendLog(`--- STARTING BATCH ${batchNumber} (${currentBatch.length} accounts in parallel) ---`, 'info');
 
+        // Launch 5 workers with a 1.2s stagger to prevent initial CPU spikes
+        const batchPromises = currentBatch.map(async (row, batchIdx) => {
+          const workerId = batchIdx + 1;
+          const rowIndex = i + batchIdx;
+
+          await delay(batchIdx * 1200);
+
+          if (globalSuccesses >= TARGET_SUCCESSES) return false;
+
+          const success = await processAccount(row, rowIndex, workerId);
           if (success) {
             globalSuccesses++;
-            sendLog(`SUCCESS (${globalSuccesses}/${TARGET_SUCCESSES}): Account row ${item.index + 1} completed!`, 'info');
-
-            if (globalSuccesses >= TARGET_SUCCESSES) {
-              sendLog(`🎉 TARGET REACHED: Successfully created ${TARGET_SUCCESSES} accounts! Stopping execution pool.`, 'info', true);
-              break;
-            }
-          } else {
-            sendLog(`Failed row ${item.index + 1}. Worker ${workerId} moving to next in queue...`, 'warn');
+            sendLog(`SUCCESS (${globalSuccesses}/${TARGET_SUCCESSES}): Row ${rowIndex + 1} completed!`, 'info');
           }
+          return success;
+        });
 
-          await randomDelay(1000, 2500);
+        // Hard await: Batch will not finish until all 5 workers complete or recover
+        await Promise.all(batchPromises);
+
+        sendLog(`--- BATCH ${batchNumber} FINISHED. Total verified successes: ${globalSuccesses}/${TARGET_SUCCESSES} ---`, 'info');
+
+        if (globalSuccesses >= TARGET_SUCCESSES) {
+          sendLog(`🎉 TARGET REACHED: Successfully created ${TARGET_SUCCESSES} accounts! Stopping execution engine.`, 'info', true);
+          break;
         }
-      };
 
-      // Launch 5 instances in parallel
-      const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
-      await Promise.all(workers);
-
-      sendLog(`Execution batch completed. Total successes: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
-
-      if (browserInstance) {
-        await browserInstance.disconnect().catch(() => {});
-        browserInstance = null;
+        await delay(2000);
       }
+
+      sendLog(`Execution complete. Final verified total: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
     })();
 
   } catch (err) {
