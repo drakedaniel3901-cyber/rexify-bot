@@ -118,125 +118,106 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
 
   for (let i = 0; i < accountRows.length; i++) {
     const row = accountRows[i];
+    const randomEmail = generateRandomEmail();
+    const randomPassword = generateRandomPassword();
     const bankName = row.bankName || 'OPay';
     const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
 
-    let success = false;
-    let attempt = 0;
-    const maxRetries = 2;
+    sendLog(`--- Processing ${i + 1}/${accountRows.length} ---`, 'info');
+    sendLog(`Generated Identity: ${randomEmail}`);
 
-    // Retry loop for sign up or account page errors (up to 2 fallback retries)
-    while (!success && attempt <= maxRetries) {
-      if (attempt > 0) {
-        sendLog(`Retrying row ${i + 1} (${accountNumber}) - Attempt ${attempt} of ${maxRetries}...`, 'warn');
-      } else {
-        sendLog(`--- Processing ${i + 1}/${accountRows.length} ---`, 'info');
+    let context = null;
+    try {
+      const browser = await getBrowser();
+      context = await browser.createBrowserContext();
+      let page = await context.newPage();
+
+      await page.emulate(mobileDevice);
+
+      // STEP 1: Landing Page
+      sendLog(`Navigating to target URL in mobile view...`);
+      await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+
+      const getStartedBtn = await page.waitForSelector('text/Get started', { timeout: 15000 });
+      await Promise.all([
+        getStartedBtn.click(),
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
+      ]);
+
+      const pages = await context.pages();
+      if (pages.length > 1) {
+        page = pages[pages.length - 1];
+        await page.emulate(mobileDevice);
       }
 
-      const randomEmail = generateRandomEmail();
-      const randomPassword = generateRandomPassword();
-      sendLog(`Generated Identity: ${randomEmail}`);
+      sendLog(`Clicked 'Get started'. Current URL: ${page.url()}`);
+      await delay(2000);
 
-      let context = null;
+      // STEP 2: Registration
+      sendLog(`Filling signup form with generated credentials...`);
+      
+      const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { timeout: 15000 });
+      await emailSelector.type(randomEmail, { delay: 40 });
+
+      const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { timeout: 10000 });
+      await passSelector.type(randomPassword, { delay: 40 });
+
+      const checkbox = await page.$('input[type="checkbox"]');
+      if (checkbox) await checkbox.click();
+
+      const continueBtn = await page.waitForSelector('text/Continue', { timeout: 15000 });
+      await Promise.all([
+        continueBtn.click(),
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
+      ]);
+
+      sendLog(`Clicked 'Continue'. Pausing 5s...`);
+      await delay(5000);
+
+      // STEP 3: Setup Withdrawals
+      sendLog(`Applying mapped Bank (${bankName}) & Account Number (${accountNumber})...`);
+      
+      await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { timeout: 15000 });
+
       try {
-        const browser = await getBrowser();
-        context = await browser.createBrowserContext();
-        let page = await context.newPage();
-
-        await page.emulate(mobileDevice);
-
-        // STEP 1: Landing Page
-        sendLog(`Navigating to target URL in mobile view...`);
-        await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 30000 });
-
-        const getStartedBtn = await page.waitForSelector('text/Get started', { timeout: 15000 });
-        await Promise.all([
-          getStartedBtn.click(),
-          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
-        ]);
-
-        const pages = await context.pages();
-        if (pages.length > 1) {
-          page = pages[pages.length - 1];
-          await page.emulate(mobileDevice);
-        }
-
-        sendLog(`Clicked 'Get started'. Current URL: ${page.url()}`);
-        await delay(2000);
-
-        // STEP 2: Registration
-        sendLog(`Filling signup form with generated credentials...`);
-        
-        const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { timeout: 15000 });
-        await emailSelector.type(randomEmail, { delay: 40 });
-
-        const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { timeout: 10000 });
-        await passSelector.type(randomPassword, { delay: 40 });
-
-        const checkbox = await page.$('input[type="checkbox"]');
-        if (checkbox) await checkbox.click();
-
-        const continueBtn = await page.waitForSelector('text/Continue', { timeout: 15000 });
-        await Promise.all([
-          continueBtn.click(),
-          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {})
-        ]);
-
-        sendLog(`Clicked 'Continue'. Pausing 5s...`);
-        await delay(5000);
-
-        // STEP 3: Setup Withdrawals
-        sendLog(`Applying mapped Bank (${bankName}) & Account Number (${accountNumber})...`);
-        
-        await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { timeout: 15000 });
-
-        try {
-          await page.select('select', bankName);
-        } catch (e) {
-          await page.evaluate((bName) => {
-            const select = document.querySelector('select');
-            if (!select) return;
-            for (let option of select.options) {
-              if (
-                option.text.toLowerCase().includes(bName.toLowerCase()) ||
-                option.value.toLowerCase().includes(bName.toLowerCase())
-              ) {
-                select.value = option.value;
-                select.dispatchEvent(new Event('change', { bubbles: true }));
-                break;
-              }
+        await page.select('select', bankName);
+      } catch (e) {
+        await page.evaluate((bName) => {
+          const select = document.querySelector('select');
+          if (!select) return;
+          for (let option of select.options) {
+            if (
+              option.text.toLowerCase().includes(bName.toLowerCase()) ||
+              option.value.toLowerCase().includes(bName.toLowerCase())
+            ) {
+              select.value = option.value;
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+              break;
             }
-          }, bankName);
-        }
+          }
+        }, bankName);
+      }
 
-        const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { timeout: 5000 });
-        await accountInput.type(accountNumber, { delay: 40 });
+      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { timeout: 5000 });
+      await accountInput.type(accountNumber, { delay: 40 });
 
-        const verifyBtn = await page.waitForSelector('text/Verify account', { timeout: 15000 });
-        await verifyBtn.click();
-        sendLog(`Clicked 'Verify account'. Pausing 8s for API verification...`);
-        await delay(8000);
+      const verifyBtn = await page.waitForSelector('text/Verify account', { timeout: 15000 });
+      await verifyBtn.click();
+      sendLog(`Clicked 'Verify account'. Pausing 8s for API verification...`);
+      await delay(8000);
 
-        const finishBtn = await page.waitForSelector('text/Finish & continue', { timeout: 15000 });
-        await finishBtn.click();
-        
-        // Increased timer to 15sec after finishing/new account setup
-        sendLog(`Clicked 'Finish & continue'. Pausing 15s for new account stabilization...`);
-        await delay(15000);
+      const finishBtn = await page.waitForSelector('text/Finish & continue', { timeout: 15000 });
+      await finishBtn.click();
+      sendLog(`Clicked 'Finish & continue'. Pausing 5s...`);
+      await delay(5000);
 
-        sendLog(`Successfully finished account setup for: ${accountNumber}`, 'info');
-        success = true;
+      sendLog(`Successfully finished account setup for: ${accountNumber}`, 'info');
 
-      } catch (err) {
-        attempt++;
-        sendLog(`Error on row ${i + 1} (${accountNumber}): ${err.message}`, 'error');
-        if (attempt > maxRetries) {
-          sendLog(`Max retries (${maxRetries}) reached for row ${i + 1}. Moving to next account.`, 'error');
-        }
-      } finally {
-        if (context) {
-          await context.close().catch(() => {});
-        }
+    } catch (err) {
+      sendLog(`Error processing row ${i + 1} (${accountNumber}): ${err.message}`, 'error');
+    } finally {
+      if (context) {
+        await context.close().catch(() => {});
       }
     }
   }
