@@ -11,7 +11,7 @@ process.on('uncaughtException', (err) => {
 try {
   require('dotenv').config();
 } catch (e) {
-  // Gracefully ignored in production
+  // Gracefully ignored when environment variables are injected directly in production
 }
 
 const express = require('express');
@@ -136,7 +136,7 @@ async function getBrowser() {
 
   browserInstance = await puppeteer.connect({
     browserWSEndpoint: process.env.BROWSERLESS_WS,
-    protocolTimeout: 45000, // Boosted to handle network latency
+    protocolTimeout: 45000,
   });
 
   // Extract raw WS socket for frame-level pings
@@ -147,7 +147,7 @@ async function getBrowser() {
     wsHeartbeatTimer = setInterval(() => {
       if (rawWs.readyState === WebSocket.OPEN) {
         try {
-          rawWs.ping(); // Prevents 60s idle timeouts on proxies
+          rawWs.ping();
         } catch (err) {
           console.error('[WS HEARTBEAT ERR]:', err.message);
         }
@@ -164,7 +164,7 @@ async function getBrowser() {
   return browserInstance;
 }
 
-// Single Account Creation Handler
+// Single Account Creation Handler (Original Flow Restored)
 async function processAccount(row, rowIndex, workerId) {
   const bankName = row.bankName || 'OPay';
   const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
@@ -270,7 +270,7 @@ async function processAccount(row, rowIndex, workerId) {
 
       while (Date.now() - startTime < 12000) {
         const result = await page.evaluate(() => {
-          const bodyText = document.body ? document.body.innerText : '';
+          const bodyText = document.body.innerText || '';
           if (bodyText.includes('Account name') || bodyText.includes('Verified')) {
             return 'success';
           }
@@ -278,7 +278,7 @@ async function processAccount(row, rowIndex, workerId) {
             return 'failed';
           }
           return 'pending';
-        }).catch(() => 'pending');
+        });
 
         if (result !== 'pending') {
           status = result;
@@ -300,47 +300,14 @@ async function processAccount(row, rowIndex, workerId) {
       throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
     }
 
-    // STEP 4: Final Submission & Real Response Confirmation
+    // Finish & Continue (Original Logic Restored)
     const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 15000 });
     await randomDelay(800, 1500);
+    await finishBtn.click();
 
-    // Trigger click and wait for network/navigation response
-    await Promise.all([
-      finishBtn.click(),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
-    ]);
+    sendLog(`[Worker ${workerId}] Clicked 'Finish & continue'. Stabilizing account (15s)...`);
+    await delay(15000);
 
-    sendLog(`[Worker ${workerId}] Clicked 'Finish & continue'. Confirming registration completion...`);
-
-    // Poll for DOM/URL changes indicating successful account finalization
-    let isFullyFinalized = false;
-    const confirmStart = Date.now();
-
-    while (Date.now() - confirmStart < 15000) {
-      isFullyFinalized = await page.evaluate(() => {
-        const bodyText = document.body ? document.body.innerText : '';
-        const currentUrl = window.location.href;
-
-        // Returns true if redirected away from registration or sees dashboard/success UI
-        return (
-          currentUrl.includes('/dashboard') ||
-          currentUrl.includes('/home') ||
-          bodyText.includes('Dashboard') ||
-          bodyText.includes('Welcome') ||
-          bodyText.includes('Successful') ||
-          !bodyText.includes('Finish & continue')
-        );
-      }).catch(() => false);
-
-      if (isFullyFinalized) break;
-      await delay(1000);
-    }
-
-    if (!isFullyFinalized) {
-      throw new Error("Final account registration could not be verified by backend before timeout.");
-    }
-
-    sendLog(`[Worker ${workerId}] Account creation fully finalized and confirmed for ${accountNumber}!`, 'info');
     return true;
 
   } catch (err) {
@@ -353,7 +320,7 @@ async function processAccount(row, rowIndex, workerId) {
   }
 }
 
-// 6. Main Runner with Concurrency = 3 and Auto-Stop at 20 Successes
+// 6. Main Runner with Concurrency = 5 and Auto-Stop at 20 Successes
 app.post('/api/start', upload.single('csvFile'), async (req, res) => {
   try {
     if (!req.file) {
@@ -378,7 +345,7 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
     (async () => {
       let globalSuccesses = 0;
       const TARGET_SUCCESSES = 20;
-      const CONCURRENCY = 3; // Reduced to 3 workers for optimal Browserless memory stability
+      const CONCURRENCY = 5;
 
       const queue = accountRows.map((row, index) => ({ row, index }));
 
@@ -405,7 +372,7 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
         }
       };
 
-      // Launch 3 instances in parallel
+      // Launch 5 instances in parallel
       const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
       await Promise.all(workers);
 
