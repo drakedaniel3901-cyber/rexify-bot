@@ -14,7 +14,7 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 const PORT = process.env.PORT || 3000;
-const TARGET_URL = process.env.TARGET_URL || 'https://rexify.com.ng?reference=drakedaniel3901';
+const TARGET_URL = process.env.TARGET_URL || 'https://rexify.com.ng?reference=sholaupdates';
 
 const mobileDevice = KnownDevices['iPhone 13 Pro'];
 
@@ -50,10 +50,12 @@ function generateRandomPassword() {
   return `Pass!${Math.random().toString(36).slice(-8)}`;
 }
 
+// SSE Logging Endpoint with Heartbeat Ping
 app.get('/api/logs', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Prevents Render/Nginx from buffering SSE output
   res.flushHeaders();
 
   const clientId = Date.now();
@@ -63,6 +65,17 @@ app.get('/api/logs', (req, res) => {
     sseClients = sseClients.filter((client) => client.id !== clientId);
   });
 });
+
+// Periodic Ping Interval (Keeps connection alive every 10s during long pauses)
+setInterval(() => {
+  sseClients.forEach((client) => {
+    try {
+      client.res.write(': keep-alive\n\n');
+    } catch (err) {
+      // Handled cleanly on connection close
+    }
+  });
+}, 10000);
 
 function parseCSVBuffer(buffer) {
   const content = buffer.toString('utf-8');
@@ -131,7 +144,7 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
     while (!success && attempt <= maxRetries) {
       if (attempt > 0) {
         sendLog(`Retrying row ${i + 1} (${accountNumber}) - Attempt ${attempt} of ${maxRetries}...`, 'warn');
-        await randomDelay(3000, 5000); // Backoff before retrying
+        await randomDelay(3000, 5000);
       } else {
         sendLog(`--- Processing ${i + 1}/${accountRows.length} ---`, 'info');
       }
@@ -155,7 +168,7 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
         await randomDelay(1500, 3000);
 
         const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 15000 });
-        await randomDelay(800, 1500); // Micro-pause before clicking
+        await randomDelay(800, 1500);
         await Promise.all([
           getStartedBtn.click(),
           page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
@@ -255,7 +268,6 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
       }
     }
 
-    // Cooldown buffer between rows to avoid overloading target site
     if (i < accountRows.length - 1) {
       sendLog(`Cooling down before starting next row...`);
       await randomDelay(3000, 6000);
