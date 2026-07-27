@@ -11,12 +11,13 @@ process.on('uncaughtException', (err) => {
 try {
   require('dotenv').config();
 } catch (e) {
-  // Gracefully ignored when environment variables are injected directly in production
+  // Gracefully ignored in production
 }
 
 const express = require('express');
 const multer = require('multer');
 const puppeteer = require('puppeteer');
+const WebSocket = require('ws');
 const { KnownDevices } = require('puppeteer');
 
 const app = express();
@@ -114,21 +115,49 @@ function parseCSVBuffer(buffer) {
   });
 }
 
-// 5. Browser Instance Manager
+// 5. Browser Instance Manager with Frame-Level WS Heartbeat
 let browserInstance = null;
+let wsHeartbeatTimer = null;
+
+function stopWsHeartbeat() {
+  if (wsHeartbeatTimer) {
+    clearInterval(wsHeartbeatTimer);
+    wsHeartbeatTimer = null;
+  }
+}
 
 async function getBrowser() {
   if (browserInstance && browserInstance.isConnected()) {
     return browserInstance;
   }
 
+  stopWsHeartbeat();
   sendLog('Establishing Browserless WebSocket connection...', 'info');
+
   browserInstance = await puppeteer.connect({
     browserWSEndpoint: process.env.BROWSERLESS_WS,
+    protocolTimeout: 45000, // Boosted to handle network latency
   });
+
+  // Extract raw WS socket for frame-level pings
+  const transport = browserInstance._connection?._transport;
+  const rawWs = transport?._ws || transport?.ws || null;
+
+  if (rawWs) {
+    wsHeartbeatTimer = setInterval(() => {
+      if (rawWs.readyState === WebSocket.OPEN) {
+        try {
+          rawWs.ping(); // Prevents 60s idle timeouts on proxies
+        } catch (err) {
+          console.error('[WS HEARTBEAT ERR]:', err.message);
+        }
+      }
+    }, 15000);
+  }
 
   browserInstance.on('disconnected', () => {
     sendLog('Browserless connection dropped. Reconnect queued...', 'error');
+    stopWsHeartbeat();
     browserInstance = null;
   });
 
@@ -241,7 +270,7 @@ async function processAccount(row, rowIndex, workerId) {
 
       while (Date.now() - startTime < 12000) {
         const result = await page.evaluate(() => {
-          const bodyText = document.body.innerText || '';
+          const bodyText = document.body ? document.body.innerText : '';
           if (bodyText.includes('Account name') || bodyText.includes('Verified')) {
             return 'success';
           }
@@ -249,7 +278,7 @@ async function processAccount(row, rowIndex, workerId) {
             return 'failed';
           }
           return 'pending';
-        });
+        }).catch(() => 'pending');
 
         if (result !== 'pending') {
           status = result;
@@ -271,14 +300,47 @@ async function processAccount(row, rowIndex, workerId) {
       throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
     }
 
-    // Finish & Continue
+    // STEP 4: Final Submission & Real Response Confirmation
     const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 15000 });
     await randomDelay(800, 1500);
-    await finishBtn.click();
 
-    sendLog(`[Worker ${workerId}] Clicked 'Finish & continue'. Stabilizing account (15s)...`);
-    await delay(15000);
+    // Trigger click and wait for network/navigation response
+    await Promise.all([
+      finishBtn.click(),
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
+    ]);
 
+    sendLog(`[Worker ${workerId}] Clicked 'Finish & continue'. Confirming registration completion...`);
+
+    // Poll for DOM/URL changes indicating successful account finalization
+    let isFullyFinalized = false;
+    const confirmStart = Date.now();
+
+    while (Date.now() - confirmStart < 15000) {
+      isFullyFinalized = await page.evaluate(() => {
+        const bodyText = document.body ? document.body.innerText : '';
+        const currentUrl = window.location.href;
+
+        // Returns true if redirected away from registration or sees dashboard/success UI
+        return (
+          currentUrl.includes('/dashboard') ||
+          currentUrl.includes('/home') ||
+          bodyText.includes('Dashboard') ||
+          bodyText.includes('Welcome') ||
+          bodyText.includes('Successful') ||
+          !bodyText.includes('Finish & continue')
+        );
+      }).catch(() => false);
+
+      if (isFullyFinalized) break;
+      await delay(1000);
+    }
+
+    if (!isFullyFinalized) {
+      throw new Error("Final account registration could not be verified by backend before timeout.");
+    }
+
+    sendLog(`[Worker ${workerId}] Account creation fully finalized and confirmed for ${accountNumber}!`, 'info');
     return true;
 
   } catch (err) {
@@ -291,7 +353,7 @@ async function processAccount(row, rowIndex, workerId) {
   }
 }
 
-// 6. Main Runner with Concurrency = 5 and Auto-Stop at 20 Successes
+// 6. Main Runner with Concurrency = 3 and Auto-Stop at 20 Successes
 app.post('/api/start', upload.single('csvFile'), async (req, res) => {
   try {
     if (!req.file) {
@@ -316,7 +378,7 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
     (async () => {
       let globalSuccesses = 0;
       const TARGET_SUCCESSES = 20;
-      const CONCURRENCY = 5;
+      const CONCURRENCY = 3; // Reduced to 3 workers for optimal Browserless memory stability
 
       const queue = accountRows.map((row, index) => ({ row, index }));
 
@@ -343,12 +405,13 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
         }
       };
 
-      // Launch 5 instances in parallel
+      // Launch 3 instances in parallel
       const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
       await Promise.all(workers);
 
       sendLog(`Execution batch completed. Total successes: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
 
+      stopWsHeartbeat();
       if (browserInstance) {
         await browserInstance.disconnect().catch(() => {});
         browserInstance = null;
