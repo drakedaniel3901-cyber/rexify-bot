@@ -240,20 +240,42 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
             sendLog(`Clicked 'Continue'. Waiting for withdrawal form...`);
             await randomDelay(4000, 6000);
 
-            // STEP 3: Setup Withdrawals with 7 Verification Retries
+            // STEP 3: Setup Withdrawals with Strict Guard Verification Loop
             sendLog(`Applying mapped Bank (${bankName}) & Account Number (${accountNumber})...`);
 
             let isVerified = false;
             let verifyAttempt = 0;
             const MAX_VERIFY_ATTEMPTS = 7;
 
+            // Guard function to evaluate state on DOM
+            const checkVerificationStatus = async () => {
+              return await page.evaluate(() => {
+                const body = document.body ? document.body.innerText : '';
+                const hasAccountName = body.includes('Account name') || body.includes('Account Name') || body.includes('Verified');
+                
+                // Check if Finish & Continue button exists and is clickable
+                const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+                const finishBtn = buttons.find(b => b.innerText && b.innerText.includes('Finish & continue'));
+                const isFinishBtnReady = finishBtn && !finishBtn.disabled && finishBtn.getAttribute('aria-disabled') !== 'true';
+
+                return hasAccountName || isFinishBtnReady;
+              }).catch(() => false);
+            };
+
             while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
+              // GUARD CHECK 1: Proceed immediately if already verified
+              if (await checkVerificationStatus()) {
+                isVerified = true;
+                sendLog(`Guard check passed: Account ${accountNumber} is verified! Proceeding...`, 'info');
+                break;
+              }
+
               verifyAttempt++;
               sendLog(`Verification attempt ${verifyAttempt}/${MAX_VERIFY_ATTEMPTS} for account ${accountNumber}...`);
 
               const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 15000 });
 
-              // Clear and type account number
+              // Re-input account number
               await accountInput.click({ clickCount: 3 });
               await accountInput.press('Backspace');
               await randomDelay(300, 600);
@@ -282,18 +304,16 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
               const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 15000 });
               await randomDelay(800, 1500);
               await verifyBtn.click();
-              sendLog(`Clicked 'Verify account'. Waiting for verification API...`);
+              sendLog(`Clicked 'Verify account'. Waiting for verification API response...`);
               await randomDelay(6000, 8000);
 
-              // Verification check
-              const finishBtnExists = await page.$('text/Finish & continue');
-              const bodyText = await page.evaluate(() => (document.body ? document.body.innerText : ''));
-
-              if (finishBtnExists || bodyText.includes('Account name') || bodyText.includes('Verified')) {
+              // GUARD CHECK 2: Evaluate post-click state
+              if (await checkVerificationStatus()) {
                 isVerified = true;
-                sendLog(`Account ${accountNumber} verified successfully!`, 'info');
+                sendLog(`Account ${accountNumber} verified successfully on attempt ${verifyAttempt}!`, 'info');
+                break;
               } else {
-                sendLog(`Verification attempt ${verifyAttempt} failed for ${accountNumber}. Retrying...`, 'warn');
+                sendLog(`Verification attempt ${verifyAttempt} failed or pending. Wiping input to re-attempt...`, 'warn');
                 await randomDelay(2000, 3000);
               }
             }
@@ -302,6 +322,7 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
               throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
             }
 
+            // Proceed once verified
             const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 15000 });
             await randomDelay(800, 1500);
             await finishBtn.click();
