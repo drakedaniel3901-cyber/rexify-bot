@@ -110,7 +110,7 @@ function parseCSVBuffer(buffer) {
   });
 }
 
-// 5. Browser Instance Manager with CDP Keep-Alive
+// 5. Browser Instance Manager with Connection Retries
 let browserInstance = null;
 let cdpHeartbeatTimer = null;
 
@@ -121,32 +121,40 @@ function stopCdpHeartbeat() {
   }
 }
 
-async function getBrowser() {
+async function getBrowser(retries = 3) {
   if (browserInstance && browserInstance.isConnected()) {
     return browserInstance;
   }
 
   stopCdpHeartbeat();
 
-  browserInstance = await puppeteer.connect({
-    browserWSEndpoint: process.env.BROWSERLESS_WS,
-    protocolTimeout: 60000,
-  });
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      browserInstance = await puppeteer.connect({
+        browserWSEndpoint: process.env.BROWSERLESS_WS,
+        protocolTimeout: 60000,
+      });
 
-  cdpHeartbeatTimer = setInterval(async () => {
-    if (browserInstance && browserInstance.isConnected()) {
-      try {
-        await browserInstance.version();
-      } catch (err) {}
+      cdpHeartbeatTimer = setInterval(async () => {
+        if (browserInstance && browserInstance.isConnected()) {
+          try {
+            await browserInstance.version();
+          } catch (err) {}
+        }
+      }, 10000);
+
+      browserInstance.on('disconnected', () => {
+        stopCdpHeartbeat();
+        browserInstance = null;
+      });
+
+      return browserInstance;
+    } catch (err) {
+      if (attempt === retries) throw err;
+      sendLog(`[Browser Connection] Attempt ${attempt} failed (${err.message}). Retrying in 2s...`, 'warn');
+      await delay(2000 * attempt);
     }
-  }, 10000);
-
-  browserInstance.on('disconnected', () => {
-    stopCdpHeartbeat();
-    browserInstance = null;
-  });
-
-  return browserInstance;
+  }
 }
 
 // Fast Account Creation Handler
@@ -164,7 +172,6 @@ async function processAccount(row, rowIndex, workerId) {
     context = await browser.createBrowserContext();
     let page = await context.newPage();
 
-    // Block non-essential heavy resources to boost performance & save bandwidth
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
@@ -176,14 +183,13 @@ async function processAccount(row, rowIndex, workerId) {
     });
 
     await page.emulate(mobileDevice);
-    page.setDefaultTimeout(12000);
+    page.setDefaultTimeout(15000);
 
     // STEP 1: Landing Page
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-    const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 8000 });
+    const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 15000 });
 
-    // Listen deterministically for new tab target creation before clicking
     const targetPromise = context.waitForTarget((t) => t.opener() === page.target(), { timeout: 5000 }).catch(() => null);
     await getStartedBtn.click();
 
@@ -201,15 +207,15 @@ async function processAccount(row, rowIndex, workerId) {
           }
         });
         await page.emulate(mobileDevice);
-        page.setDefaultTimeout(12000);
+        page.setDefaultTimeout(15000);
       }
     }
 
     // STEP 2: Fast Registration Fill
-    const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 8000 });
+    const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 15000 });
     await emailSelector.type(randomEmail, { delay: 0 });
 
-    const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 8000 });
+    const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 12000 });
     await passSelector.type(randomPassword, { delay: 0 });
 
     const checkbox = await page.$('input[type="checkbox"]');
@@ -217,7 +223,7 @@ async function processAccount(row, rowIndex, workerId) {
       await checkbox.click();
     }
 
-    const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 8000 });
+    const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 12000 });
     await continueBtn.click();
 
     // STEP 3: Withdrawal Setup & Fast Verification Loop
@@ -228,13 +234,12 @@ async function processAccount(row, rowIndex, workerId) {
     while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
       verifyAttempt++;
 
-      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 8000 });
+      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 12000 });
 
       await accountInput.click({ clickCount: 3 });
       await accountInput.press('Backspace');
       await accountInput.type(accountNumber, { delay: 0 });
 
-      // Fast Select Bank in Single Evaluation
       await page.evaluate((bName) => {
         const select = document.querySelector('select');
         if (!select) return;
@@ -249,10 +254,9 @@ async function processAccount(row, rowIndex, workerId) {
         }
       }, bankName);
 
-      const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 8000 });
+      const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 12000 });
       await verifyBtn.click();
 
-      // Native In-Browser DOM Wait (No heavy CDP round-trips)
       const status = await page.waitForFunction(
         () => {
           const bodyText = document.body ? document.body.innerText : '';
@@ -260,7 +264,7 @@ async function processAccount(row, rowIndex, workerId) {
           if (bodyText.includes('Not verified') || bodyText.includes('Could not verify')) return 'failed';
           return null;
         },
-        { timeout: 7000, polling: 100 }
+        { timeout: 10000, polling: 200 }
       )
       .then((handle) => handle.jsonValue())
       .catch(() => 'pending');
@@ -279,7 +283,7 @@ async function processAccount(row, rowIndex, workerId) {
     }
 
     // STEP 4: Finish & Continue
-    const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 8000 });
+    const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 12000 });
     await finishBtn.click();
     await delay(500);
 
@@ -319,11 +323,14 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
     (async () => {
       let globalSuccesses = 0;
       const TARGET_SUCCESSES = 20;
-      const CONCURRENCY = 5;
+      const CONCURRENCY = parseInt(process.env.CONCURRENCY) || 3; // Reduced default to prevent session limits
 
       const queue = accountRows.map((row, index) => ({ row, index }));
 
       const worker = async (workerId) => {
+        // Stagger worker startup to avoid sending parallel connection requests simultaneously
+        await delay((workerId - 1) * 1500);
+
         while (queue.length > 0 && globalSuccesses < TARGET_SUCCESSES) {
           const item = queue.shift();
           if (!item) break;
@@ -338,11 +345,11 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
               sendLog(`🎉 TARGET REACHED: Successfully created ${TARGET_SUCCESSES} accounts! Stopping execution pool.`, 'info', true);
               break;
             }
+            await delay(500);
           } else {
-            sendLog(`Failed row ${item.index + 1}. Worker ${workerId} moving to next...`, 'warn');
+            sendLog(`Failed row ${item.index + 1}. Worker ${workerId} cooling down for 3s before next row...`, 'warn');
+            await delay(3000); // Cool-down delay on failure to recover from rate limits
           }
-
-          await delay(200);
         }
       };
 
