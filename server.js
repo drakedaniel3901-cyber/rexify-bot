@@ -1,4 +1,4 @@
-// 1. Crash Guards (Prevents background errors from killing Express on Render)
+// 1. Crash Guards
 process.on('unhandledRejection', (reason, promise) => {
   console.error('[CRASH GUARD] Unhandled Rejection at:', promise, 'reason:', reason);
 });
@@ -10,9 +10,7 @@ process.on('uncaughtException', (err) => {
 // 2. Safe dotenv initialization
 try {
   require('dotenv').config();
-} catch (e) {
-  // Gracefully ignored when environment variables are injected directly in production
-}
+} catch (e) {}
 
 const express = require('express');
 const multer = require('multer');
@@ -56,10 +54,7 @@ function sendLog(message, type = 'normal', done = false) {
   });
 }
 
-// Dynamic delay helpers
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const randomDelay = (min = 1000, max = 3000) => 
-  delay(Math.floor(Math.random() * (max - min + 1)) + min);
 
 function generateRandomEmail() {
   const randStr = Math.random().toString(36).substring(2, 8);
@@ -70,7 +65,7 @@ function generateRandomPassword() {
   return `Pass!${Math.random().toString(36).slice(-8)}`;
 }
 
-// 4. Server-Sent Events (SSE) Endpoint with Heartbeat Ping
+// 4. Server-Sent Events (SSE)
 app.get('/api/logs', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -92,9 +87,7 @@ setInterval(() => {
   sseClients.forEach((client) => {
     try {
       client.res.write(': keep-alive\n\n');
-    } catch (err) {
-      // Cleaned up on disconnect
-    }
+    } catch (err) {}
   });
 }, 10000);
 
@@ -114,150 +107,47 @@ function parseCSVBuffer(buffer) {
   });
 }
 
-// 5. Browser Connection Manager (Robust with Retries & Health Checks)
+// 5. Browser Instance Manager with CDP Keep-Alive
 let browserInstance = null;
-let browserConnectPromise = null;
-let healthCheckTimer = null;
-let lastSuccessfulHealthcheck = 0;
-let rawWs = null;
+let cdpHeartbeatTimer = null;
 
-// Tunables (override with env vars)
-const RECONNECT_BASE_MS = parseInt(process.env.RECONNECT_BASE_MS || '1000', 10);
-const RECONNECT_MAX_MS = parseInt(process.env.RECONNECT_MAX_MS || '30000', 10);
-const RECONNECT_MAX_ATTEMPTS = parseInt(process.env.RECONNECT_MAX_ATTEMPTS || '10', 10);
-const HEALTHCHECK_INTERVAL_MS = parseInt(process.env.HEALTHCHECK_INTERVAL_MS || '15000', 10);
-const HEALTHCHECK_TIMEOUT_MS = parseInt(process.env.HEALTHCHECK_TIMEOUT_MS || '5000', 10);
-
-// Helper: wait with timeout
-const withTimeout = (ms, promise) =>
-  Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
-  ]);
-
-// Stop healthcheck
-function stopHealthChecks() {
-  if (healthCheckTimer) {
-    clearInterval(healthCheckTimer);
-    healthCheckTimer = null;
-  }
-  rawWs = null;
-}
-
-// Force-close and clear instance
-async function clearBrowserInstance() {
-  stopHealthChecks();
-  if (browserInstance) {
-    try {
-      // prefer disconnect() for remote browser
-      await browserInstance.disconnect();
-    } catch (e) {
-      try { await browserInstance.close(); } catch (_) {}
-    }
-  }
-  browserInstance = null;
-}
-
-// Exponential backoff with jitter
-function backoffDelay(attempt) {
-  const base = RECONNECT_BASE_MS * Math.pow(2, Math.max(0, attempt - 1));
-  const capped = Math.min(base, RECONNECT_MAX_MS);
-  const jitter = Math.floor(Math.random() * 500);
-  return capped + jitter;
-}
-
-// Active health-check: call a light RPC to ensure connection is usable
-async function runHealthCheck() {
-  if (!browserInstance) return;
-  try {
-    // browser.version() is a light RPC; it will throw if connection is unusable
-    await withTimeout(HEALTHCHECK_TIMEOUT_MS, browserInstance.version());
-    lastSuccessfulHealthcheck = Date.now();
-    return true;
-  } catch (err) {
-    console.error('[BROWSER HEALTHCHECK] failed:', err.message || err);
-    // trigger reconnect by clearing instance
-    await clearBrowserInstance();
-    return false;
+function stopCdpHeartbeat() {
+  if (cdpHeartbeatTimer) {
+    clearInterval(cdpHeartbeatTimer);
+    cdpHeartbeatTimer = null;
   }
 }
 
-// Connect with retries (serialized via browserConnectPromise)
-async function connectWithRetry() {
-  if (browserInstance && browserInstance.isConnected && browserInstance.isConnected()) {
+async function getBrowser() {
+  if (browserInstance && browserInstance.isConnected()) {
     return browserInstance;
   }
-  if (browserConnectPromise) {
-    // Another caller is already connecting; wait for it
-    return browserConnectPromise;
-  }
 
-  browserConnectPromise = (async () => {
-    let attempt = 0;
-    let lastError = null;
+  stopCdpHeartbeat();
 
-    while (attempt < RECONNECT_MAX_ATTEMPTS) {
-      attempt++;
+  browserInstance = await puppeteer.connect({
+    browserWSEndpoint: process.env.BROWSERLESS_WS,
+    protocolTimeout: 60000,
+  });
+
+  // Protocol Keep-Alive ping every 10 seconds
+  cdpHeartbeatTimer = setInterval(async () => {
+    if (browserInstance && browserInstance.isConnected()) {
       try {
-        sendLog(`Attempting puppeteer.connect() (attempt ${attempt})`, 'info');
-        const b = await puppeteer.connect({
-          browserWSEndpoint: process.env.BROWSERLESS_WS,
-          protocolTimeout: 45000
-        });
-
-        // set global instance & extract raw ws if available
-        browserInstance = b;
-        // best-effort: internal transport may differ; keep optional
-        const transport = browserInstance._connection?._transport;
-        rawWs = transport?._ws || transport?.ws || null;
-
-        // On disconnect listener
-        browserInstance.on('disconnected', async () => {
-          sendLog('Browserless connection dropped (event). Scheduling reconnect...', 'error');
-          await clearBrowserInstance();
-        });
-
-        // Start health checks
-        stopHealthChecks();
-        healthCheckTimer = setInterval(() => {
-          // run but don't await inside timer
-          runHealthCheck().catch(() => {});
-        }, HEALTHCHECK_INTERVAL_MS);
-
-        // run initial health check immediately
-        await runHealthCheck();
-
-        sendLog('Connected to browserless successfully', 'info');
-        browserConnectPromise = null;
-        return browserInstance;
-      } catch (err) {
-        lastError = err;
-        sendLog(`puppeteer.connect() failed (attempt ${attempt}): ${err.message || err}`, 'warn');
-        // clear any half state
-        await clearBrowserInstance();
-        const delayMs = backoffDelay(attempt);
-        await delay(delayMs);
-      }
+        await browserInstance.version();
+      } catch (err) {}
     }
+  }, 10000);
 
-    browserConnectPromise = null;
-    throw new Error(`Failed to connect to browserless after ${RECONNECT_MAX_ATTEMPTS} attempts: ${lastError && lastError.message}`);
-  })();
+  browserInstance.on('disconnected', () => {
+    stopCdpHeartbeat();
+    browserInstance = null;
+  });
 
-  return browserConnectPromise;
+  return browserInstance;
 }
 
-// Public accessor used by processAccount()
-async function getBrowser() {
-  try {
-    return await connectWithRetry();
-  } catch (err) {
-    sendLog(`ERROR: Unable to obtain browser: ${err.message}`, 'error');
-    throw err;
-  }
-}
-
-// 6. Single Account Creation Handler
+// Fast Account Creation Handler
 async function processAccount(row, rowIndex, workerId) {
   const bankName = row.bankName || 'OPay';
   const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
@@ -273,67 +163,52 @@ async function processAccount(row, rowIndex, workerId) {
     let page = await context.newPage();
 
     await page.emulate(mobileDevice);
-    page.setDefaultTimeout(25000);
+    page.setDefaultTimeout(15000);
 
-    // STEP 1: Landing Page
-    await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 35000 });
-    await randomDelay(1000, 2000);
+    // STEP 1: Landing Page (Fast domcontentloaded)
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-    const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 15000 });
-    await randomDelay(500, 1000);
-    await Promise.all([
-      getStartedBtn.click(),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
-    ]);
+    const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 10000 });
+    await getStartedBtn.click();
 
+    await delay(400);
     const pages = await context.pages();
     if (pages.length > 1) {
       page = pages[pages.length - 1];
       await page.emulate(mobileDevice);
-      page.setDefaultTimeout(25000);
+      page.setDefaultTimeout(15000);
     }
 
-    await randomDelay(1500, 3000);
+    // STEP 2: Fast Registration Fill
+    const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 10000 });
+    await emailSelector.type(randomEmail, { delay: 0 });
 
-    // STEP 2: Registration
-    const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 15000 });
-    await emailSelector.type(randomEmail, { delay: 50 });
-
-    const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 10000 });
-    await passSelector.type(randomPassword, { delay: 50 });
+    const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 8000 });
+    await passSelector.type(randomPassword, { delay: 0 });
 
     const checkbox = await page.$('input[type="checkbox"]');
     if (checkbox) {
       await checkbox.click();
     }
 
-    const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 15000 });
-    await randomDelay(600, 1200);
-    await Promise.all([
-      continueBtn.click(),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
-    ]);
+    const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 10000 });
+    await continueBtn.click();
 
-    await randomDelay(3000, 5000);
-
-    // STEP 3: Withdrawal Setup & 7x Retry Verification Loop
+    // STEP 3: Withdrawal Setup & Fast Verification Loop
     let isVerified = false;
     let verifyAttempt = 0;
     const MAX_VERIFY_ATTEMPTS = 7;
 
     while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
       verifyAttempt++;
-      sendLog(`[Worker ${workerId}] Verification attempt ${verifyAttempt}/${MAX_VERIFY_ATTEMPTS} for ${accountNumber}...`);
 
-      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 15000 });
+      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 10000 });
 
-      // Clear input field cleanly
       await accountInput.click({ clickCount: 3 });
       await accountInput.press('Backspace');
-      await randomDelay(300, 600);
-      await accountInput.type(accountNumber, { delay: 50 });
+      await accountInput.type(accountNumber, { delay: 0 });
 
-      // Select Bank
+      // Fast Select Bank
       try {
         await page.select('select', bankName);
       } catch (e) {
@@ -353,17 +228,16 @@ async function processAccount(row, rowIndex, workerId) {
         }, bankName);
       }
 
-      const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 15000 });
-      await randomDelay(500, 1000);
+      const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 10000 });
       await verifyBtn.click();
 
-      // Poll DOM state for up to 12 seconds
+      // Poll DOM rapidly (every 300ms up to 8s)
       const startTime = Date.now();
       let status = 'pending';
 
-      while (Date.now() - startTime < 12000) {
+      while (Date.now() - startTime < 8000) {
         const result = await page.evaluate(() => {
-          const bodyText = document.body.innerText || '';
+          const bodyText = document.body ? document.body.innerText : '';
           if (bodyText.includes('Account name') || bodyText.includes('Verified')) {
             return 'success';
           }
@@ -371,21 +245,21 @@ async function processAccount(row, rowIndex, workerId) {
             return 'failed';
           }
           return 'pending';
-        });
+        }).catch(() => 'pending');
 
         if (result !== 'pending') {
           status = result;
           break;
         }
-        await delay(1000);
+        await delay(300);
       }
 
       if (status === 'success') {
         isVerified = true;
-        sendLog(`[Worker ${workerId}] Account verified successfully for ${accountNumber}!`, 'info');
+        sendLog(`[Worker ${workerId}] Verified ${accountNumber}!`, 'info');
       } else {
-        sendLog(`[Worker ${workerId}] Verification returned '${status}' on attempt ${verifyAttempt}. Re-inputting...`, 'warn');
-        await randomDelay(1500, 3000);
+        sendLog(`[Worker ${workerId}] Verification '${status}' (attempt ${verifyAttempt}). Retrying...`, 'warn');
+        await delay(800);
       }
     }
 
@@ -393,13 +267,10 @@ async function processAccount(row, rowIndex, workerId) {
       throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
     }
 
-    // Finish & Continue
-    const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 15000 });
-    await randomDelay(800, 1500);
+    // STEP 4: Finish & Continue (No extra delays)
+    const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 10000 });
     await finishBtn.click();
-
-    sendLog(`[Worker ${workerId}] Clicked 'Finish & continue'. Stabilizing account (15s)...`);
-    await delay(15000);
+    await delay(1000); // Short 1s buffer for request dispatch
 
     return true;
 
@@ -413,7 +284,7 @@ async function processAccount(row, rowIndex, workerId) {
   }
 }
 
-// 7. Main Runner with Concurrency = 5 and Auto-Stop at 20 Successes
+// 6. Main Runner
 app.post('/api/start', upload.single('csvFile'), async (req, res) => {
   try {
     if (!req.file) {
@@ -434,7 +305,6 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
       return;
     }
 
-    // Concurrent Work Queue Engine
     (async () => {
       let globalSuccesses = 0;
       const TARGET_SUCCESSES = 20;
@@ -458,21 +328,23 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
               break;
             }
           } else {
-            sendLog(`Failed row ${item.index + 1}. Worker ${workerId} moving to next in queue...`, 'warn');
+            sendLog(`Failed row ${item.index + 1}. Worker ${workerId} moving to next...`, 'warn');
           }
 
-          await randomDelay(1000, 2500);
+          await delay(300);
         }
       };
 
-      // Launch 5 instances in parallel
       const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
       await Promise.all(workers);
 
       sendLog(`Execution batch completed. Total successes: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
 
-      // Clean up browser instance & healthchecks via manager helper
-      await clearBrowserInstance();
+      stopCdpHeartbeat();
+      if (browserInstance) {
+        await browserInstance.disconnect().catch(() => {});
+        browserInstance = null;
+      }
     })();
 
   } catch (err) {
