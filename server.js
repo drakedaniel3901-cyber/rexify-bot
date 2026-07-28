@@ -240,33 +240,36 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
             sendLog(`Clicked 'Continue'. Waiting for withdrawal form...`);
             await randomDelay(4000, 6000);
 
-            // STEP 3: Setup Withdrawals with Strict Guard Verification Loop
+            // STEP 3: Setup Withdrawals with Dynamic Response Polling (No timers)
             sendLog(`Applying mapped Bank (${bankName}) & Account Number (${accountNumber})...`);
 
             let isVerified = false;
             let verifyAttempt = 0;
             const MAX_VERIFY_ATTEMPTS = 7;
 
-            // Guard function to evaluate state on DOM
-            const checkVerificationStatus = async () => {
+            // Helper function to check state instantly from DOM
+            const checkVerificationState = async () => {
               return await page.evaluate(() => {
                 const body = document.body ? document.body.innerText : '';
-                const hasAccountName = body.includes('Account name') || body.includes('Account Name') || body.includes('Verified');
-                
-                // Check if Finish & Continue button exists and is clickable
                 const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
                 const finishBtn = buttons.find(b => b.innerText && b.innerText.includes('Finish & continue'));
                 const isFinishBtnReady = finishBtn && !finishBtn.disabled && finishBtn.getAttribute('aria-disabled') !== 'true';
 
-                return hasAccountName || isFinishBtnReady;
-              }).catch(() => false);
+                if (body.includes('Account name') || body.includes('Account Name') || body.includes('Verified') || isFinishBtnReady) {
+                  return 'success';
+                }
+                if (body.includes('Not verified') || body.includes('Could not verify') || body.includes('Invalid account') || body.includes('Failed')) {
+                  return 'failed';
+                }
+                return 'pending';
+              }).catch(() => 'pending');
             };
 
             while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
-              // GUARD CHECK 1: Proceed immediately if already verified
-              if (await checkVerificationStatus()) {
+              // PRE-GUARD: Proceed immediately if already verified
+              if ((await checkVerificationState()) === 'success') {
                 isVerified = true;
-                sendLog(`Guard check passed: Account ${accountNumber} is verified! Proceeding...`, 'info');
+                sendLog(`Pre-guard check passed: Account ${accountNumber} is already verified! Proceeding...`, 'info');
                 break;
               }
 
@@ -304,17 +307,28 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
               const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 15000 });
               await randomDelay(800, 1500);
               await verifyBtn.click();
-              sendLog(`Clicked 'Verify account'. Waiting for verification API response...`);
-              await randomDelay(6000, 8000);
+              sendLog(`Clicked 'Verify account'. Actively polling for verification response...`);
 
-              // GUARD CHECK 2: Evaluate post-click state
-              if (await checkVerificationStatus()) {
+              // ACTIVE RESPONSE POLLING LOOP (replaces blind timer)
+              const pollStart = Date.now();
+              const MAX_POLL_TIME = 10000; // 10s timeout per click
+              let pollStatus = 'pending';
+
+              while (Date.now() - pollStart < MAX_POLL_TIME) {
+                pollStatus = await checkVerificationState();
+                if (pollStatus !== 'pending') {
+                  break; // Exit poll loop immediately when success or failed is detected
+                }
+                await delay(400); // Poll DOM state every 400ms
+              }
+
+              if (pollStatus === 'success') {
                 isVerified = true;
                 sendLog(`Account ${accountNumber} verified successfully on attempt ${verifyAttempt}!`, 'info');
                 break;
               } else {
-                sendLog(`Verification attempt ${verifyAttempt} failed or pending. Wiping input to re-attempt...`, 'warn');
-                await randomDelay(2000, 3000);
+                sendLog(`Verification attempt ${verifyAttempt} resulting state: '${pollStatus}'. Re-inputting to retry...`, 'warn');
+                await randomDelay(1000, 2000);
               }
             }
 
