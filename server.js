@@ -84,10 +84,13 @@ app.get('/api/logs', (req, res) => {
 });
 
 setInterval(() => {
-  sseClients.forEach((client) => {
+  sseClients = sseClients.filter((client) => {
     try {
       client.res.write(': keep-alive\n\n');
-    } catch (err) {}
+      return true;
+    } catch (err) {
+      return false;
+    }
   });
 }, 10000);
 
@@ -130,7 +133,6 @@ async function getBrowser() {
     protocolTimeout: 60000,
   });
 
-  // Protocol Keep-Alive ping every 10 seconds
   cdpHeartbeatTimer = setInterval(async () => {
     if (browserInstance && browserInstance.isConnected()) {
       try {
@@ -162,25 +164,49 @@ async function processAccount(row, rowIndex, workerId) {
     context = await browser.createBrowserContext();
     let page = await context.newPage();
 
+    // Block non-essential heavy resources to boost performance & save bandwidth
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     await page.emulate(mobileDevice);
-    page.setDefaultTimeout(15000);
+    page.setDefaultTimeout(12000);
 
-    // STEP 1: Landing Page (Fast domcontentloaded)
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    // STEP 1: Landing Page
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-    const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 10000 });
+    const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 8000 });
+
+    // Listen deterministically for new tab target creation before clicking
+    const targetPromise = context.waitForTarget((t) => t.opener() === page.target(), { timeout: 5000 }).catch(() => null);
     await getStartedBtn.click();
 
-    await delay(400);
-    const pages = await context.pages();
-    if (pages.length > 1) {
-      page = pages[pages.length - 1];
-      await page.emulate(mobileDevice);
-      page.setDefaultTimeout(15000);
+    const newTarget = await targetPromise;
+    if (newTarget) {
+      const poppedPage = await newTarget.page();
+      if (poppedPage) {
+        page = poppedPage;
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+          if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+            req.abort();
+          } else {
+            req.continue();
+          }
+        });
+        await page.emulate(mobileDevice);
+        page.setDefaultTimeout(12000);
+      }
     }
 
     // STEP 2: Fast Registration Fill
-    const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 10000 });
+    const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 8000 });
     await emailSelector.type(randomEmail, { delay: 0 });
 
     const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 8000 });
@@ -191,7 +217,7 @@ async function processAccount(row, rowIndex, workerId) {
       await checkbox.click();
     }
 
-    const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 10000 });
+    const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 8000 });
     await continueBtn.click();
 
     // STEP 3: Withdrawal Setup & Fast Verification Loop
@@ -202,64 +228,49 @@ async function processAccount(row, rowIndex, workerId) {
     while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
       verifyAttempt++;
 
-      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 10000 });
+      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 8000 });
 
       await accountInput.click({ clickCount: 3 });
       await accountInput.press('Backspace');
       await accountInput.type(accountNumber, { delay: 0 });
 
-      // Fast Select Bank
-      try {
-        await page.select('select', bankName);
-      } catch (e) {
-        await page.evaluate((bName) => {
-          const select = document.querySelector('select');
-          if (!select) return;
-          for (let option of select.options) {
-            if (
-              option.text.toLowerCase().includes(bName.toLowerCase()) ||
-              option.value.toLowerCase().includes(bName.toLowerCase())
-            ) {
-              select.value = option.value;
-              select.dispatchEvent(new Event('change', { bubbles: true }));
-              break;
-            }
-          }
-        }, bankName);
-      }
+      // Fast Select Bank in Single Evaluation
+      await page.evaluate((bName) => {
+        const select = document.querySelector('select');
+        if (!select) return;
+        const option = Array.from(select.options).find(
+          (opt) =>
+            opt.text.toLowerCase().includes(bName.toLowerCase()) ||
+            opt.value.toLowerCase().includes(bName.toLowerCase())
+        );
+        if (option) {
+          select.value = option.value;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, bankName);
 
-      const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 10000 });
+      const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 8000 });
       await verifyBtn.click();
 
-      // Poll DOM rapidly (every 300ms up to 8s)
-      const startTime = Date.now();
-      let status = 'pending';
-
-      while (Date.now() - startTime < 8000) {
-        const result = await page.evaluate(() => {
+      // Native In-Browser DOM Wait (No heavy CDP round-trips)
+      const status = await page.waitForFunction(
+        () => {
           const bodyText = document.body ? document.body.innerText : '';
-          if (bodyText.includes('Account name') || bodyText.includes('Verified')) {
-            return 'success';
-          }
-          if (bodyText.includes('Not verified') || bodyText.includes('Could not verify')) {
-            return 'failed';
-          }
-          return 'pending';
-        }).catch(() => 'pending');
-
-        if (result !== 'pending') {
-          status = result;
-          break;
-        }
-        await delay(300);
-      }
+          if (bodyText.includes('Account name') || bodyText.includes('Verified')) return 'success';
+          if (bodyText.includes('Not verified') || bodyText.includes('Could not verify')) return 'failed';
+          return null;
+        },
+        { timeout: 7000, polling: 100 }
+      )
+      .then((handle) => handle.jsonValue())
+      .catch(() => 'pending');
 
       if (status === 'success') {
         isVerified = true;
         sendLog(`[Worker ${workerId}] Verified ${accountNumber}!`, 'info');
       } else {
         sendLog(`[Worker ${workerId}] Verification '${status}' (attempt ${verifyAttempt}). Retrying...`, 'warn');
-        await delay(800);
+        await delay(500);
       }
     }
 
@@ -267,10 +278,10 @@ async function processAccount(row, rowIndex, workerId) {
       throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
     }
 
-    // STEP 4: Finish & Continue (No extra delays)
-    const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 10000 });
+    // STEP 4: Finish & Continue
+    const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 8000 });
     await finishBtn.click();
-    await delay(1000); // Short 1s buffer for request dispatch
+    await delay(500);
 
     return true;
 
@@ -331,7 +342,7 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
             sendLog(`Failed row ${item.index + 1}. Worker ${workerId} moving to next...`, 'warn');
           }
 
-          await delay(300);
+          await delay(200);
         }
       };
 
