@@ -125,6 +125,7 @@ class BrowserlessConnection {
       protocolTimeout: 30000,
     });
 
+    // Grab raw WS connection for frame-level pings
     const transport = this.browser._connection?._transport;
     this.rawWs = transport?._ws || transport?.ws || null;
 
@@ -146,6 +147,7 @@ class BrowserlessConnection {
     this._heartbeatTimer = setInterval(() => {
       if (!this.rawWs || this.rawWs.readyState !== WebSocket.OPEN) return;
       try {
+        // Raw ping prevents 60s idle timeouts on Render / Browserless proxies
         this.rawWs.ping();
       } catch (err) {
         console.error(`[HEARTBEAT ERR] ${this.id}:`, err.message);
@@ -225,6 +227,7 @@ class ConnectionPool {
       if (conn.healthy && conn.browser) return conn;
     }
 
+    // Fallback: force reconnect first connection if all are down
     const fallbackConn = this.connections[0];
     if (fallbackConn) {
       await fallbackConn.connect();
@@ -256,6 +259,7 @@ class ContextManager {
       context = await conn.browser.createBrowserContext();
       page = await context.newPage();
 
+      // High-speed resource blocking
       await page.setRequestInterception(true);
       page.on('request', (req) => {
         const type = req.resourceType();
@@ -393,57 +397,15 @@ async function runRexifyWorkflow(page, context, task) {
   await page.emulate(mobileDevice);
   page.setDefaultTimeout(10000);
 
-  // ---------------------------------------------------------
-  // OPTIMIZED STEP 1: Landing Page & Deterministic Pop-Up Capture
-  // ---------------------------------------------------------
+  // STEP 1: Landing Page
   await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 12000 });
-
-  // 1. Listen for new target/tab BEFORE executing click
-  const targetPromise = context.waitForTarget(
-    (target) => target.opener() === page.target() || target.type() === 'page',
-    { timeout: 6000 }
-  ).catch(() => null);
-
-  // 2. Locate "Get started" button cleanly
-  const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 8000 })
-    .catch(async () => {
-      // Fallback selector if text/ engine stalls
-      return page.evaluateHandle(() => {
-        const elements = Array.from(document.querySelectorAll('a, button, div'));
-        return elements.find(el => el.textContent.trim().toLowerCase().includes('get started'));
-      });
-    });
-
-  if (!getStartedBtn) throw new Error('Could not locate "Get started" button on landing page.');
-
-  // 3. Click and wait for target resolution
+  const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 8000 });
   await getStartedBtn.click();
-  const newTarget = await targetPromise;
 
-  // 4. Switch context page reference if new tab opened
-  if (newTarget) {
-    const newPage = await newTarget.page();
-    if (newPage && newPage !== page) {
-      page = newPage;
-      await page.setRequestInterception(true).catch(() => {});
-      page.on('request', (req) => {
-        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
-          req.abort();
-        } else {
-          req.continue();
-        }
-      });
-      await page.emulate(mobileDevice);
-      page.setDefaultTimeout(10000);
-    }
-  } else {
-    // Fallback tab grabber
-    const pages = await context.pages();
-    if (pages.length > 1) {
-      page = pages[pages.length - 1];
-      await page.emulate(mobileDevice);
-      page.setDefaultTimeout(10000);
-    }
+  const pages = await context.pages();
+  if (pages.length > 1) {
+    page = pages[pages.length - 1];
+    await page.emulate(mobileDevice);
   }
 
   // STEP 2: Fast Registration
@@ -488,6 +450,7 @@ async function runRexifyWorkflow(page, context, task) {
     const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 8000 });
     await verifyBtn.click();
 
+    // Fast status check loop (polling every 250ms)
     const startTime = Date.now();
     let status = 'pending';
 
