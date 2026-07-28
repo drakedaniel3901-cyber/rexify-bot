@@ -1,13 +1,11 @@
 // 1. Crash Guards
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('[CRASH GUARD] Unhandled Rejection at:', promise, 'reason:', reason);
+  console.error('[CRASH GUARD] Unhandled Rejection:', reason);
 });
-
 process.on('uncaughtException', (err) => {
-  console.error('[CRASH GUARD] Uncaught Exception thrown:', err);
+  console.error('[CRASH GUARD] Uncaught Exception:', err);
 });
 
-// 2. Safe dotenv initialization
 try {
   require('dotenv').config();
 } catch (e) {}
@@ -15,6 +13,7 @@ try {
 const express = require('express');
 const multer = require('multer');
 const puppeteer = require('puppeteer');
+const WebSocket = require('ws');
 const { KnownDevices } = require('puppeteer');
 
 const app = express();
@@ -22,17 +21,16 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 const PORT = process.env.PORT || 3000;
 const TARGET_URL = process.env.TARGET_URL || 'https://rexify.com.ng?reference=sholaupdates';
-
 const mobileDevice = KnownDevices['iPhone 13 Pro'];
 
-// 3. Global CORS Middleware
+// ---------------------------------------------------------
+// 2. SSE LOGGING ENGINE
+// ---------------------------------------------------------
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
@@ -43,7 +41,6 @@ let sseClients = [];
 function sendLog(message, type = 'normal', done = false) {
   console.log(`[LOG] ${message}`);
   const payload = JSON.stringify({ message, type, done });
-
   sseClients = sseClients.filter((client) => {
     try {
       client.res.write(`data: ${payload}\n\n`);
@@ -54,18 +51,9 @@ function sendLog(message, type = 'normal', done = false) {
   });
 }
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function generateRandomEmail() {
-  const randStr = Math.random().toString(36).substring(2, 8);
-  return `user_${Date.now()}_${randStr}@gmail.com`;
-}
-
-function generateRandomPassword() {
-  return `Pass!${Math.random().toString(36).slice(-8)}`;
-}
-
-// 4. Server-Sent Events (SSE)
+// SSE Endpoint
 app.get('/api/logs', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -74,7 +62,6 @@ app.get('/api/logs', (req, res) => {
   res.flushHeaders();
 
   res.write(': keep-alive\n\n');
-
   const clientId = Date.now();
   sseClients.push({ id: clientId, res });
 
@@ -84,295 +71,554 @@ app.get('/api/logs', (req, res) => {
 });
 
 setInterval(() => {
-  sseClients = sseClients.filter((client) => {
-    try {
-      client.res.write(': keep-alive\n\n');
-      return true;
-    } catch (err) {
-      return false;
-    }
+  sseClients.forEach((client) => {
+    try { client.res.write(': keep-alive\n\n'); } catch (err) {}
   });
 }, 10000);
+
+// ---------------------------------------------------------
+// 3. CONNECTION POOL WITH FRAME-LEVEL WS HEARTBEAT
+// ---------------------------------------------------------
+class BrowserlessConnection {
+  constructor({ endpoint, id, heartbeatMs = 15000, maxTasksBeforeRecycle = 300 }) {
+    this.endpoint = endpoint;
+    this.id = id;
+    this.heartbeatMs = heartbeatMs;
+    this.maxTasksBeforeRecycle = maxTasksBeforeRecycle;
+
+    this.browser = null;
+    this.rawWs = null;
+    this.healthy = false;
+    this.taskCount = 0;
+    this.failureStreak = 0;
+    this.circuitOpenUntil = 0;
+    this._heartbeatTimer = null;
+    this._connecting = null;
+  }
+
+  isCircuitOpen() {
+    return Date.now() < this.circuitOpenUntil;
+  }
+
+  tripCircuit(ms = 10000) {
+    this.circuitOpenUntil = Date.now() + ms;
+    this.healthy = false;
+  }
+
+  async connect() {
+    if (this._connecting) return this._connecting;
+    this._connecting = this._doConnect();
+    try {
+      await this._connecting;
+    } finally {
+      this._connecting = null;
+    }
+  }
+
+  async _doConnect() {
+    await this._cleanup();
+
+    sendLog(`[BROWSER ENGINE] Connecting to Browserless (${this.id})...`, 'info');
+
+    this.browser = await puppeteer.connect({
+      browserWSEndpoint: this.endpoint,
+      protocolTimeout: 30000,
+    });
+
+    const transport = this.browser._connection?._transport;
+    this.rawWs = transport?._ws || transport?.ws || null;
+
+    this.browser.on('disconnected', () => {
+      sendLog(`[BROWSER ENGINE] ⚠️ Socket disconnected (${this.id})`, 'warn');
+      this.healthy = false;
+      this._stopHeartbeat();
+    });
+
+    this._startHeartbeat();
+    this.healthy = true;
+    this.failureStreak = 0;
+    this.taskCount = 0;
+    sendLog(`[BROWSER ENGINE] Connected successfully (${this.id})!`, 'info');
+  }
+
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    this._heartbeatTimer = setInterval(() => {
+      if (!this.rawWs || this.rawWs.readyState !== WebSocket.OPEN) return;
+      try {
+        this.rawWs.ping();
+      } catch (err) {
+        console.error(`[HEARTBEAT ERR] ${this.id}:`, err.message);
+      }
+    }, this.heartbeatMs);
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) clearInterval(this._heartbeatTimer);
+    this._heartbeatTimer = null;
+  }
+
+  needsRecycle() {
+    return this.taskCount >= this.maxTasksBeforeRecycle;
+  }
+
+  async _cleanup() {
+    this._stopHeartbeat();
+    try {
+      if (this.browser) this.browser.disconnect();
+    } catch (_) {}
+    this.browser = null;
+    this.rawWs = null;
+  }
+}
+
+class ConnectionPool {
+  constructor({ endpoints, heartbeatMs = 15000 }) {
+    this.endpoints = endpoints;
+    this.heartbeatMs = heartbeatMs;
+    this.connections = [];
+    this._rrIndex = 0;
+  }
+
+  async init() {
+    this.connections = this.endpoints.map(
+      (endpoint, i) => new BrowserlessConnection({ endpoint, id: `conn-${i + 1}`, heartbeatMs: this.heartbeatMs })
+    );
+
+    for (const conn of this.connections) {
+      conn.browser?.on('disconnected', () => this._handleDrop(conn));
+      await conn.connect().catch((err) => {
+        conn.tripCircuit(5000);
+        sendLog(`[BROWSER ENGINE] Initial connect failed for ${conn.id}: ${err.message}`, 'warn');
+      });
+    }
+  }
+
+  async _handleDrop(conn) {
+    if (conn._reconnecting) return;
+    conn._reconnecting = true;
+    sendLog(`[BROWSER ENGINE] Reconnecting dropped socket ${conn.id}...`, 'warn');
+    await delay(1000);
+    try {
+      await conn.connect();
+    } catch (err) {
+      conn.tripCircuit(8000);
+      setTimeout(() => this._handleDrop(conn), 8500);
+    } finally {
+      conn._reconnecting = false;
+    }
+  }
+
+  async acquire() {
+    const n = this.connections.length;
+    for (let attempt = 0; attempt < n; attempt++) {
+      const conn = this.connections[this._rrIndex % n];
+      this._rrIndex++;
+
+      if (conn.isCircuitOpen()) continue;
+
+      if (conn.needsRecycle()) {
+        conn.connect().catch(() => conn.tripCircuit(5000));
+        continue;
+      }
+
+      if (conn.healthy && conn.browser) return conn;
+    }
+
+    const fallbackConn = this.connections[0];
+    if (fallbackConn) {
+      await fallbackConn.connect();
+      return fallbackConn;
+    }
+
+    throw new Error('No healthy Browserless connections available');
+  }
+}
+
+// ---------------------------------------------------------
+// 4. CONTEXT MANAGER (LIGHTWEIGHT RUNTIME)
+// ---------------------------------------------------------
+class ContextManager {
+  constructor({ maxConcurrentPerConnection = 5 } = {}) {
+    this.maxConcurrentPerConnection = maxConcurrentPerConnection;
+    this._inFlight = new Map();
+  }
+
+  async withContext(conn, fn) {
+    const count = this._inFlight.get(conn.id) || 0;
+    if (count >= this.maxConcurrentPerConnection) {
+      throw new Error('SATURATED');
+    }
+    this._inFlight.set(conn.id, count + 1);
+
+    let context, page;
+    try {
+      context = await conn.browser.createBrowserContext();
+      page = await context.newPage();
+
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        const type = req.resourceType();
+        if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+          req.abort();
+        } else {
+          req.continue();
+        }
+      });
+
+      conn.taskCount++;
+      return await fn(page, context);
+    } finally {
+      try { if (page && !page.isClosed()) await page.close(); } catch (_) {}
+      try { if (context) await context.close(); } catch (_) {}
+      this._inFlight.set(conn.id, Math.max(0, (this._inFlight.get(conn.id) || 1) - 1));
+    }
+  }
+}
+
+// ---------------------------------------------------------
+// 5. FAST-PATH CDP & JS HELPERS
+// ---------------------------------------------------------
+const FastActions = {
+  async fastClick(page, selector) {
+    await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) throw new Error(`Element not found: ${sel}`);
+      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      el.click();
+    }, selector);
+  },
+
+  async fastType(page, selector, value) {
+    await page.evaluate((sel, val) => {
+      const el = document.querySelector(sel);
+      if (!el) throw new Error(`Element not found: ${sel}`);
+      const proto = Object.getPrototypeOf(el);
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      setter ? setter.call(el, val) : (el.value = val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, selector, value);
+  },
+
+  async waitForAny(page, selectors, timeout = 10000) {
+    return page.waitForFunction(
+      (sels) => sels.some((s) => document.querySelector(s)),
+      { timeout, polling: 100 },
+      selectors
+    );
+  }
+};
+
+// ---------------------------------------------------------
+// 6. RESILIENT TASK EXECUTOR
+// ---------------------------------------------------------
+class ResilientExecutor {
+  constructor({ pool, contextManager, maxRetries = 2 }) {
+    this.pool = pool;
+    this.contextManager = contextManager;
+    this.maxRetries = maxRetries;
+  }
+
+  isRecoverableError(err) {
+    const msg = err?.message || '';
+    return (
+      /detached frame/i.test(msg) ||
+      /target closed/i.test(msg) ||
+      /session closed/i.test(msg) ||
+      /websocket/i.test(msg) ||
+      /protocol error/i.test(msg) ||
+      msg === 'SATURATED'
+    );
+  }
+
+  async run(task, taskFn) {
+    let lastErr;
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      let conn;
+      try {
+        conn = await this.pool.acquire();
+      } catch (err) {
+        lastErr = err;
+        await delay(500 * (attempt + 1));
+        continue;
+      }
+
+      try {
+        const result = await this.contextManager.withContext(conn, (page, context) =>
+          taskFn(page, context, task)
+        );
+        conn.failureStreak = 0;
+        return result;
+      } catch (err) {
+        lastErr = err;
+        conn.failureStreak++;
+
+        if (conn.failureStreak >= 3) conn.tripCircuit(8000);
+
+        if (!this.isRecoverableError(err) || attempt === this.maxRetries) {
+          throw err;
+        }
+
+        sendLog(`[Worker ${task.workerId}] Recoverable glitch (${err.message}). Retrying (${attempt + 1}/${this.maxRetries})...`, 'warn');
+        await delay(300 * Math.pow(2, attempt));
+      }
+    }
+    throw lastErr;
+  }
+}
+
+// ---------------------------------------------------------
+// 7. REXIFY WORKFLOW FUNCTION
+// ---------------------------------------------------------
+function generateRandomEmail() {
+  return `user_${Date.now()}_${Math.random().toString(36).substring(2, 8)}@gmail.com`;
+}
+
+function generateRandomPassword() {
+  return `Pass!${Math.random().toString(36).slice(-8)}`;
+}
+
+async function runRexifyWorkflow(page, context, task) {
+  const { row, rowIndex, workerId } = task;
+  const bankName = row.bankName || 'OPay';
+  const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
+  const email = generateRandomEmail();
+  const password = generateRandomPassword();
+
+  sendLog(`[Worker ${workerId}] [Row ${rowIndex + 1}] Processing ${accountNumber} (${email})`, 'info');
+
+  await page.emulate(mobileDevice);
+  page.setDefaultTimeout(10000);
+
+  // ---------------------------------------------------------
+  // OPTIMIZED STEP 1: Landing Page & Deterministic Pop-Up Capture
+  // ---------------------------------------------------------
+  await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 12000 });
+
+  // 1. Listen for new target/tab BEFORE executing click
+  const targetPromise = context.waitForTarget(
+    (target) => target.opener() === page.target() || target.type() === 'page',
+    { timeout: 6000 }
+  ).catch(() => null);
+
+  // 2. Locate "Get started" button cleanly
+  const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 8000 })
+    .catch(async () => {
+      // Fallback selector if text/ engine stalls
+      return page.evaluateHandle(() => {
+        const elements = Array.from(document.querySelectorAll('a, button, div'));
+        return elements.find(el => el.textContent.trim().toLowerCase().includes('get started'));
+      });
+    });
+
+  if (!getStartedBtn) throw new Error('Could not locate "Get started" button on landing page.');
+
+  // 3. Click and wait for target resolution
+  await getStartedBtn.click();
+  const newTarget = await targetPromise;
+
+  // 4. Switch context page reference if new tab opened
+  if (newTarget) {
+    const newPage = await newTarget.page();
+    if (newPage && newPage !== page) {
+      page = newPage;
+      await page.setRequestInterception(true).catch(() => {});
+      page.on('request', (req) => {
+        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+          req.abort();
+        } else {
+          req.continue();
+        }
+      });
+      await page.emulate(mobileDevice);
+      page.setDefaultTimeout(10000);
+    }
+  } else {
+    // Fallback tab grabber
+    const pages = await context.pages();
+    if (pages.length > 1) {
+      page = pages[pages.length - 1];
+      await page.emulate(mobileDevice);
+      page.setDefaultTimeout(10000);
+    }
+  }
+
+  // STEP 2: Fast Registration
+  await FastActions.waitForAny(page, ['input[type="email"]', 'input[name="email"]']);
+  await FastActions.fastType(page, 'input[type="email"], input[name="email"]', email);
+  await FastActions.fastType(page, 'input[type="password"], input[name="password"]', password);
+
+  const checkbox = await page.$('input[type="checkbox"]');
+  if (checkbox) await checkbox.click();
+
+  const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 8000 });
+  await continueBtn.click();
+
+  // STEP 3: Account Verification
+  let isVerified = false;
+  let verifyAttempt = 0;
+  const MAX_VERIFY_ATTEMPTS = 5;
+
+  while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
+    verifyAttempt++;
+    sendLog(`[Worker ${workerId}] Verification attempt ${verifyAttempt}/${MAX_VERIFY_ATTEMPTS} for ${accountNumber}...`);
+
+    await FastActions.waitForAny(page, ['input[placeholder*="account number" i]', 'input[name*="account" i]']);
+    await FastActions.fastType(page, 'input[placeholder*="account number" i], input[name*="account" i]', accountNumber);
+
+    try {
+      await page.select('select', bankName);
+    } catch (e) {
+      await page.evaluate((bName) => {
+        const select = document.querySelector('select');
+        if (!select) return;
+        for (let option of select.options) {
+          if (option.text.toLowerCase().includes(bName.toLowerCase())) {
+            select.value = option.value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            break;
+          }
+        }
+      }, bankName);
+    }
+
+    const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 8000 });
+    await verifyBtn.click();
+
+    const startTime = Date.now();
+    let status = 'pending';
+
+    while (Date.now() - startTime < 6000) {
+      const result = await page.evaluate(() => {
+        const body = document.body.innerText || '';
+        if (body.includes('Account name') || body.includes('Verified')) return 'success';
+        if (body.includes('Not verified') || body.includes('Could not verify')) return 'failed';
+        return 'pending';
+      });
+
+      if (result !== 'pending') {
+        status = result;
+        break;
+      }
+      await delay(250);
+    }
+
+    if (status === 'success') {
+      isVerified = true;
+      sendLog(`[Worker ${workerId}] Account verified successfully for ${accountNumber}!`, 'info');
+    } else {
+      sendLog(`[Worker ${workerId}] Verification status '${status}'. Retrying...`, 'warn');
+      await delay(400);
+    }
+  }
+
+  if (!isVerified) throw new Error(`Verification failed after ${MAX_VERIFY_ATTEMPTS} attempts`);
+
+  const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 8000 });
+  await finishBtn.click();
+  await delay(1000);
+
+  return true;
+}
 
 function parseCSVBuffer(buffer) {
   const content = buffer.toString('utf-8');
   const lines = content.trim().split(/\r?\n/).filter(Boolean);
   if (lines.length === 0) return [];
-
   const headers = lines[0].split(',').map((h) => h.trim());
   return lines.slice(1).map((line) => {
     const values = line.split(',').map((v) => v.trim());
     const row = {};
-    headers.forEach((header, index) => {
-      row[header] = values[index] || '';
-    });
+    headers.forEach((h, idx) => { row[h] = values[idx] || ''; });
     return row;
   });
 }
 
-// 5. Browser Instance Manager with Connection Retries
-let browserInstance = null;
-let cdpHeartbeatTimer = null;
+// ---------------------------------------------------------
+// 8. BATCH DISPATCHER & EXPRESS ROUTE
+// ---------------------------------------------------------
+let globalPool = null;
 
-function stopCdpHeartbeat() {
-  if (cdpHeartbeatTimer) {
-    clearInterval(cdpHeartbeatTimer);
-    cdpHeartbeatTimer = null;
-  }
-}
-
-async function getBrowser(retries = 3) {
-  if (browserInstance && browserInstance.isConnected()) {
-    return browserInstance;
-  }
-
-  stopCdpHeartbeat();
-
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      browserInstance = await puppeteer.connect({
-        browserWSEndpoint: process.env.BROWSERLESS_WS,
-        protocolTimeout: 60000,
-      });
-
-      cdpHeartbeatTimer = setInterval(async () => {
-        if (browserInstance && browserInstance.isConnected()) {
-          try {
-            await browserInstance.version();
-          } catch (err) {}
-        }
-      }, 10000);
-
-      browserInstance.on('disconnected', () => {
-        stopCdpHeartbeat();
-        browserInstance = null;
-      });
-
-      return browserInstance;
-    } catch (err) {
-      if (attempt === retries) throw err;
-      sendLog(`[Browser Connection] Attempt ${attempt} failed (${err.message}). Retrying in 2s...`, 'warn');
-      await delay(2000 * attempt);
-    }
-  }
-}
-
-// Fast Account Creation Handler
-async function processAccount(row, rowIndex, workerId) {
-  const bankName = row.bankName || 'OPay';
-  const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
-
-  const randomEmail = generateRandomEmail();
-  const randomPassword = generateRandomPassword();
-  sendLog(`[Worker ${workerId}] [Row ${rowIndex + 1}] Processing ${accountNumber} (${randomEmail})`, 'info');
-
-  let context = null;
-  try {
-    const browser = await getBrowser();
-    context = await browser.createBrowserContext();
-    let page = await context.newPage();
-
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      const resourceType = req.resourceType();
-      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-
-    await page.emulate(mobileDevice);
-    page.setDefaultTimeout(15000);
-
-    // STEP 1: Landing Page
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
-
-    const getStartedBtn = await page.waitForSelector('text/Get started', { visible: true, timeout: 15000 });
-
-    const targetPromise = context.waitForTarget((t) => t.opener() === page.target(), { timeout: 5000 }).catch(() => null);
-    await getStartedBtn.click();
-
-    const newTarget = await targetPromise;
-    if (newTarget) {
-      const poppedPage = await newTarget.page();
-      if (poppedPage) {
-        page = poppedPage;
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-          if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
-            req.abort();
-          } else {
-            req.continue();
-          }
-        });
-        await page.emulate(mobileDevice);
-        page.setDefaultTimeout(15000);
-      }
-    }
-
-    // STEP 2: Fast Registration Fill
-    const emailSelector = await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="email" i]', { visible: true, timeout: 15000 });
-    await emailSelector.type(randomEmail, { delay: 0 });
-
-    const passSelector = await page.waitForSelector('input[type="password"], input[name="password"]', { visible: true, timeout: 12000 });
-    await passSelector.type(randomPassword, { delay: 0 });
-
-    const checkbox = await page.$('input[type="checkbox"]');
-    if (checkbox) {
-      await checkbox.click();
-    }
-
-    const continueBtn = await page.waitForSelector('text/Continue', { visible: true, timeout: 12000 });
-    await continueBtn.click();
-
-    // STEP 3: Withdrawal Setup & Fast Verification Loop
-    let isVerified = false;
-    let verifyAttempt = 0;
-    const MAX_VERIFY_ATTEMPTS = 7;
-
-    while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
-      verifyAttempt++;
-
-      const accountInput = await page.waitForSelector('input[placeholder*="account number" i], input[name*="account" i]', { visible: true, timeout: 12000 });
-
-      await accountInput.click({ clickCount: 3 });
-      await accountInput.press('Backspace');
-      await accountInput.type(accountNumber, { delay: 0 });
-
-      await page.evaluate((bName) => {
-        const select = document.querySelector('select');
-        if (!select) return;
-        const option = Array.from(select.options).find(
-          (opt) =>
-            opt.text.toLowerCase().includes(bName.toLowerCase()) ||
-            opt.value.toLowerCase().includes(bName.toLowerCase())
-        );
-        if (option) {
-          select.value = option.value;
-          select.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }, bankName);
-
-      const verifyBtn = await page.waitForSelector('text/Verify account', { visible: true, timeout: 12000 });
-      await verifyBtn.click();
-
-      const status = await page.waitForFunction(
-        () => {
-          const bodyText = document.body ? document.body.innerText : '';
-          if (bodyText.includes('Account name') || bodyText.includes('Verified')) return 'success';
-          if (bodyText.includes('Not verified') || bodyText.includes('Could not verify')) return 'failed';
-          return null;
-        },
-        { timeout: 10000, polling: 200 }
-      )
-      .then((handle) => handle.jsonValue())
-      .catch(() => 'pending');
-
-      if (status === 'success') {
-        isVerified = true;
-        sendLog(`[Worker ${workerId}] Verified ${accountNumber}!`, 'info');
-      } else {
-        sendLog(`[Worker ${workerId}] Verification '${status}' (attempt ${verifyAttempt}). Retrying...`, 'warn');
-        await delay(500);
-      }
-    }
-
-    if (!isVerified) {
-      throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
-    }
-
-    // STEP 4: Finish & Continue
-    const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 12000 });
-    await finishBtn.click();
-    await delay(500);
-
-    return true;
-
-  } catch (err) {
-    sendLog(`[Worker ${workerId}] Error on account ${accountNumber}: ${err.message}`, 'error');
-    return false;
-  } finally {
-    if (context) {
-      await context.close().catch(() => {});
-    }
-  }
-}
-
-// 6. Main Runner
 app.post('/api/start', upload.single('csvFile'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'No CSV file uploaded' });
-    }
+    if (!req.file) return res.status(400).json({ success: false, error: 'No CSV file uploaded' });
 
     const accountRows = parseCSVBuffer(req.file.buffer);
-    if (accountRows.length === 0) {
-      return res.status(400).json({ success: false, error: 'CSV file is empty' });
-    }
+    if (accountRows.length === 0) return res.status(400).json({ success: false, error: 'CSV file is empty' });
 
     res.json({ success: true, count: accountRows.length });
 
-    sendLog(`Loaded ${accountRows.length} account row(s). Starting execution pool...`, 'info');
+    sendLog(`Loaded ${accountRows.length} account row(s). Launching Turbo Pipeline...`, 'info');
 
-    if (!process.env.BROWSERLESS_WS) {
-      sendLog('ERROR: BROWSERLESS_WS environment variable is missing!', 'error', true);
+    const wsEndpoints = (process.env.BROWSERLESS_WS || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (wsEndpoints.length === 0) {
+      sendLog('ERROR: BROWSERLESS_WS environment variable missing!', 'error', true);
       return;
     }
+
+    if (!globalPool) {
+      globalPool = new ConnectionPool({ endpoints: wsEndpoints, heartbeatMs: 15000 });
+      await globalPool.init();
+    }
+
+    const contextManager = new ContextManager({ maxConcurrentPerConnection: 5 });
+    const executor = new ResilientExecutor({ pool: globalPool, contextManager, maxRetries: 2 });
 
     (async () => {
       let globalSuccesses = 0;
       const TARGET_SUCCESSES = 20;
-      const CONCURRENCY = parseInt(process.env.CONCURRENCY) || 3; // Reduced default to prevent session limits
+      const BATCH_SIZE = 5;
 
-      const queue = accountRows.map((row, index) => ({ row, index }));
+      for (let i = 0; i < accountRows.length; i += BATCH_SIZE) {
+        if (globalSuccesses >= TARGET_SUCCESSES) break;
 
-      const worker = async (workerId) => {
-        // Stagger worker startup to avoid sending parallel connection requests simultaneously
-        await delay((workerId - 1) * 1500);
+        const currentBatch = accountRows.slice(i, i + BATCH_SIZE);
+        const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
 
-        while (queue.length > 0 && globalSuccesses < TARGET_SUCCESSES) {
-          const item = queue.shift();
-          if (!item) break;
+        sendLog(`--- STARTING BATCH ${batchNumber} (${currentBatch.length} parallel tasks) ---`, 'info');
 
-          const success = await processAccount(item.row, item.index, workerId);
+        const promises = currentBatch.map(async (row, batchIdx) => {
+          const workerId = batchIdx + 1;
+          const rowIndex = i + batchIdx;
 
-          if (success) {
+          await delay(batchIdx * 200);
+
+          if (globalSuccesses >= TARGET_SUCCESSES) return false;
+
+          try {
+            const task = { row, rowIndex, workerId };
+            await executor.run(task, runRexifyWorkflow);
             globalSuccesses++;
-            sendLog(`SUCCESS (${globalSuccesses}/${TARGET_SUCCESSES}): Account row ${item.index + 1} completed!`, 'info');
-
-            if (globalSuccesses >= TARGET_SUCCESSES) {
-              sendLog(`🎉 TARGET REACHED: Successfully created ${TARGET_SUCCESSES} accounts! Stopping execution pool.`, 'info', true);
-              break;
-            }
-            await delay(500);
-          } else {
-            sendLog(`Failed row ${item.index + 1}. Worker ${workerId} cooling down for 3s before next row...`, 'warn');
-            await delay(3000); // Cool-down delay on failure to recover from rate limits
+            sendLog(`SUCCESS (${globalSuccesses}/${TARGET_SUCCESSES}): Row ${rowIndex + 1} finished!`, 'info');
+            return true;
+          } catch (err) {
+            sendLog(`[Worker ${workerId}] Row ${rowIndex + 1} failed: ${err.message}`, 'error');
+            return false;
           }
+        });
+
+        await Promise.all(promises);
+
+        if (globalSuccesses >= TARGET_SUCCESSES) {
+          sendLog(`🎉 TARGET REACHED: ${TARGET_SUCCESSES} accounts completed!`, 'info', true);
+          break;
         }
-      };
 
-      const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
-      await Promise.all(workers);
-
-      sendLog(`Execution batch completed. Total successes: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
-
-      stopCdpHeartbeat();
-      if (browserInstance) {
-        await browserInstance.disconnect().catch(() => {});
-        browserInstance = null;
+        await delay(500);
       }
+
+      sendLog(`Execution complete. Final count: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
     })();
 
   } catch (err) {
     console.error('Fatal API Error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ success: false, error: err.message });
-    }
+    if (!res.headersSent) res.status(500).json({ success: false, error: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Rexify Dashboard backend listening on port ${PORT}`);
 });
