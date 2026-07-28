@@ -17,7 +17,6 @@ try {
 const express = require('express');
 const multer = require('multer');
 const puppeteer = require('puppeteer');
-const WebSocket = require('ws');
 const { KnownDevices } = require('puppeteer');
 
 const app = express();
@@ -115,56 +114,150 @@ function parseCSVBuffer(buffer) {
   });
 }
 
-// 5. Browser Instance Manager with Frame-Level WS Heartbeat
+// 5. Browser Connection Manager (Robust with Retries & Health Checks)
 let browserInstance = null;
-let wsHeartbeatTimer = null;
+let browserConnectPromise = null;
+let healthCheckTimer = null;
+let lastSuccessfulHealthcheck = 0;
+let rawWs = null;
 
-function stopWsHeartbeat() {
-  if (wsHeartbeatTimer) {
-    clearInterval(wsHeartbeatTimer);
-    wsHeartbeatTimer = null;
+// Tunables (override with env vars)
+const RECONNECT_BASE_MS = parseInt(process.env.RECONNECT_BASE_MS || '1000', 10);
+const RECONNECT_MAX_MS = parseInt(process.env.RECONNECT_MAX_MS || '30000', 10);
+const RECONNECT_MAX_ATTEMPTS = parseInt(process.env.RECONNECT_MAX_ATTEMPTS || '10', 10);
+const HEALTHCHECK_INTERVAL_MS = parseInt(process.env.HEALTHCHECK_INTERVAL_MS || '15000', 10);
+const HEALTHCHECK_TIMEOUT_MS = parseInt(process.env.HEALTHCHECK_TIMEOUT_MS || '5000', 10);
+
+// Helper: wait with timeout
+const withTimeout = (ms, promise) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+  ]);
+
+// Stop healthcheck
+function stopHealthChecks() {
+  if (healthCheckTimer) {
+    clearInterval(healthCheckTimer);
+    healthCheckTimer = null;
+  }
+  rawWs = null;
+}
+
+// Force-close and clear instance
+async function clearBrowserInstance() {
+  stopHealthChecks();
+  if (browserInstance) {
+    try {
+      // prefer disconnect() for remote browser
+      await browserInstance.disconnect();
+    } catch (e) {
+      try { await browserInstance.close(); } catch (_) {}
+    }
+  }
+  browserInstance = null;
+}
+
+// Exponential backoff with jitter
+function backoffDelay(attempt) {
+  const base = RECONNECT_BASE_MS * Math.pow(2, Math.max(0, attempt - 1));
+  const capped = Math.min(base, RECONNECT_MAX_MS);
+  const jitter = Math.floor(Math.random() * 500);
+  return capped + jitter;
+}
+
+// Active health-check: call a light RPC to ensure connection is usable
+async function runHealthCheck() {
+  if (!browserInstance) return;
+  try {
+    // browser.version() is a light RPC; it will throw if connection is unusable
+    await withTimeout(HEALTHCHECK_TIMEOUT_MS, browserInstance.version());
+    lastSuccessfulHealthcheck = Date.now();
+    return true;
+  } catch (err) {
+    console.error('[BROWSER HEALTHCHECK] failed:', err.message || err);
+    // trigger reconnect by clearing instance
+    await clearBrowserInstance();
+    return false;
   }
 }
 
-async function getBrowser() {
-  if (browserInstance && browserInstance.isConnected()) {
+// Connect with retries (serialized via browserConnectPromise)
+async function connectWithRetry() {
+  if (browserInstance && browserInstance.isConnected && browserInstance.isConnected()) {
     return browserInstance;
   }
-
-  stopWsHeartbeat();
-  sendLog('Establishing Browserless WebSocket connection...', 'info');
-
-  browserInstance = await puppeteer.connect({
-    browserWSEndpoint: process.env.BROWSERLESS_WS,
-    protocolTimeout: 45000,
-  });
-
-  // Extract raw WS socket for frame-level pings
-  const transport = browserInstance._connection?._transport;
-  const rawWs = transport?._ws || transport?.ws || null;
-
-  if (rawWs) {
-    wsHeartbeatTimer = setInterval(() => {
-      if (rawWs.readyState === WebSocket.OPEN) {
-        try {
-          rawWs.ping();
-        } catch (err) {
-          console.error('[WS HEARTBEAT ERR]:', err.message);
-        }
-      }
-    }, 15000);
+  if (browserConnectPromise) {
+    // Another caller is already connecting; wait for it
+    return browserConnectPromise;
   }
 
-  browserInstance.on('disconnected', () => {
-    sendLog('Browserless connection dropped. Reconnect queued...', 'error');
-    stopWsHeartbeat();
-    browserInstance = null;
-  });
+  browserConnectPromise = (async () => {
+    let attempt = 0;
+    let lastError = null;
 
-  return browserInstance;
+    while (attempt < RECONNECT_MAX_ATTEMPTS) {
+      attempt++;
+      try {
+        sendLog(`Attempting puppeteer.connect() (attempt ${attempt})`, 'info');
+        const b = await puppeteer.connect({
+          browserWSEndpoint: process.env.BROWSERLESS_WS,
+          protocolTimeout: 45000
+        });
+
+        // set global instance & extract raw ws if available
+        browserInstance = b;
+        // best-effort: internal transport may differ; keep optional
+        const transport = browserInstance._connection?._transport;
+        rawWs = transport?._ws || transport?.ws || null;
+
+        // On disconnect listener
+        browserInstance.on('disconnected', async () => {
+          sendLog('Browserless connection dropped (event). Scheduling reconnect...', 'error');
+          await clearBrowserInstance();
+        });
+
+        // Start health checks
+        stopHealthChecks();
+        healthCheckTimer = setInterval(() => {
+          // run but don't await inside timer
+          runHealthCheck().catch(() => {});
+        }, HEALTHCHECK_INTERVAL_MS);
+
+        // run initial health check immediately
+        await runHealthCheck();
+
+        sendLog('Connected to browserless successfully', 'info');
+        browserConnectPromise = null;
+        return browserInstance;
+      } catch (err) {
+        lastError = err;
+        sendLog(`puppeteer.connect() failed (attempt ${attempt}): ${err.message || err}`, 'warn');
+        // clear any half state
+        await clearBrowserInstance();
+        const delayMs = backoffDelay(attempt);
+        await delay(delayMs);
+      }
+    }
+
+    browserConnectPromise = null;
+    throw new Error(`Failed to connect to browserless after ${RECONNECT_MAX_ATTEMPTS} attempts: ${lastError && lastError.message}`);
+  })();
+
+  return browserConnectPromise;
 }
 
-// Single Account Creation Handler (Original Flow Restored)
+// Public accessor used by processAccount()
+async function getBrowser() {
+  try {
+    return await connectWithRetry();
+  } catch (err) {
+    sendLog(`ERROR: Unable to obtain browser: ${err.message}`, 'error');
+    throw err;
+  }
+}
+
+// 6. Single Account Creation Handler
 async function processAccount(row, rowIndex, workerId) {
   const bankName = row.bankName || 'OPay';
   const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
@@ -300,7 +393,7 @@ async function processAccount(row, rowIndex, workerId) {
       throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
     }
 
-    // Finish & Continue (Original Logic Restored)
+    // Finish & Continue
     const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 15000 });
     await randomDelay(800, 1500);
     await finishBtn.click();
@@ -320,7 +413,7 @@ async function processAccount(row, rowIndex, workerId) {
   }
 }
 
-// 6. Main Runner with Concurrency = 5 and Auto-Stop at 20 Successes
+// 7. Main Runner with Concurrency = 5 and Auto-Stop at 20 Successes
 app.post('/api/start', upload.single('csvFile'), async (req, res) => {
   try {
     if (!req.file) {
@@ -378,11 +471,8 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
 
       sendLog(`Execution batch completed. Total successes: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
 
-      stopWsHeartbeat();
-      if (browserInstance) {
-        await browserInstance.disconnect().catch(() => {});
-        browserInstance = null;
-      }
+      // Clean up browser instance & healthchecks via manager helper
+      await clearBrowserInstance();
     })();
 
   } catch (err) {
