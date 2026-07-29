@@ -80,7 +80,7 @@ function generateRandomPassword() {
 
 // Telecom generator for Auto Account Mode (OPay & Moniepoint friendly prefixes)
 function generateAccountNumber() {
-  const prefixes = ['8032', '8033', '9153', '8167', '7035'];
+  const prefixes = ['8067', '8034', '9043', '8167', '7035'];
   const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
   const suffix = Math.floor(100000 + Math.random() * 900000).toString();
   return prefix + suffix; 
@@ -237,7 +237,7 @@ app.post('/api/start', uploadMiddleware, async (req, res) => {
 
 async function runHybridEngine(config) {
   const { accountMode, urlMode, accountRows, targetUrls, targetUrl, urlCount } = config;
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 7;
   const SUCCESSES_NEEDED = 20; // 20 fodder accounts per seed
 
   sendLog(`\n🚀 HYBRID ENGINE STARTED | URL Mode: ${urlMode.toUpperCase()} | Account Mode: ${accountMode.toUpperCase()}`, 'info');
