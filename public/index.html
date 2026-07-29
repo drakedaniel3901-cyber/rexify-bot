@@ -432,6 +432,30 @@
         setRunningState(false);
       }
     });
+
+    // Sync UI state on page load/refresh
+    async function syncServerStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        if (data.isRunning) {
+          startBtn.disabled = true;
+          startBtn.textContent = 'Running...';
+          stopBtn.disabled = data.isStopping; // keep enabled unless already stopping
+          stopBtn.textContent = data.isStopping ? 'Stopping...' : 'Stop';
+        } else {
+          startBtn.disabled = false;
+          startBtn.textContent = 'Start automation';
+          stopBtn.disabled = true;
+          stopBtn.textContent = 'Stop';
+        }
+      } catch (err) {
+        console.error('Failed to sync status:', err);
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', syncServerStatus);
   </script>
 </body>
 </html>
