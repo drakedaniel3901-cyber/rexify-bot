@@ -1,41 +1,242 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Rexify Automation Control</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
-    .container { max-width: 800px; width: 100%; }
-    h1 { font-size: 1.5rem; margin-bottom: 20px; color: #38bdf8; text-align: center; }
-    .card { background: #1e293b; padding: 20px; border-radius: 12px; border: 1px solid #334155; margin-bottom: 20px; }
-    .file-input { display: block; width: 100%; padding: 10px; margin-bottom: 15px; background: #0f172a; border: 1px dashed #475569; border-radius: 8px; color: #94a3b8; cursor: pointer; }
-    button { width: 100%; padding: 12px; background: #0284c7; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
-    button:hover { background: #0369a1; }
-    button:disabled { background: #475569; cursor: not-allowed; }
-    .terminal { background: #020617; border: 1px solid #1e293b; border-radius: 8px; padding: 15px; font-family: monospace; height: 380px; overflow-y: auto; color: #22c55e; font-size: 0.85rem; line-height: 1.5; }
-    .log-line { margin-bottom: 4px; word-break: break-word; }
-    .log-error { color: #ef4444; }
-    .log-info { color: #38bdf8; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rexify Automation Control</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/geist-sans@5.0.3/index.css">
+<style>
+  :root{
+    --black: #000000;
+    --grey-950: #0a0a0a;
+    --grey-900: #111111;
+    --grey-800: #1a1a1a;
+    --grey-700: #262626;
+    --grey-500: #737373;
+    --grey-300: #a3a3a3;
+    --white: #ffffff;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--black);
+  }
+
+  body {
+    font-family: 'Geist Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    color: var(--white);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 64px 20px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .container {
+    max-width: 640px;
+    width: 100%;
+  }
+
+  .header {
+    margin-bottom: 40px;
+  }
+
+  .eyebrow {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--grey-500);
+    margin-bottom: 10px;
+  }
+
+  h1 {
+    font-size: 2.1rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+  }
+
+  form { display: block; }
+
+  .dropzone {
+    position: relative;
+    border: 2px dashed var(--grey-700);
+    border-radius: 16px;
+    height: 220px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+    margin-bottom: 16px;
+    background: var(--grey-950);
+  }
+
+  .dropzone:hover, .dropzone.dragover {
+    border-color: var(--white);
+    background: var(--grey-900);
+  }
+
+  .dropzone.has-file {
+    border-style: solid;
+    border-color: var(--white);
+    background: var(--grey-900);
+  }
+
+  .plus-ring {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 2px solid var(--grey-500);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 18px;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+
+  .dropzone:hover .plus-ring, .dropzone.dragover .plus-ring {
+    border-color: var(--white);
+    transform: scale(1.06);
+  }
+
+  .plus-ring svg { width: 22px; height: 22px; }
+
+  .dz-title {
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+
+  .dz-sub {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--grey-500);
+    margin-top: 6px;
+  }
+
+  #csvFile { display: none; }
+
+  button {
+    width: 100%;
+    padding: 16px;
+    background: var(--white);
+    color: var(--black);
+    border: none;
+    border-radius: 12px;
+    font-family: inherit;
+    font-size: 0.95rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    cursor: pointer;
+    transition: opacity 0.15s ease, transform 0.05s ease;
+  }
+
+  button:hover { opacity: 0.85; }
+  button:active { transform: scale(0.99); }
+
+  button:disabled {
+    background: var(--grey-700);
+    color: var(--grey-500);
+    cursor: not-allowed;
+    opacity: 1;
+  }
+
+  .terminal-section {
+    margin-top: 40px;
+  }
+
+  .terminal-label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--grey-500);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--grey-500);
+  }
+
+  .terminal {
+    background: var(--grey-900);
+    border: 1px solid var(--grey-800);
+    border-radius: 12px;
+    padding: 18px 20px;
+    font-family: 'SF Mono', 'Geist Mono', ui-monospace, monospace;
+    height: 340px;
+    overflow-y: auto;
+    font-size: 0.82rem;
+    line-height: 1.7;
+  }
+
+  .terminal::-webkit-scrollbar { width: 8px; }
+  .terminal::-webkit-scrollbar-thumb { background: var(--grey-700); border-radius: 8px; }
+  .terminal::-webkit-scrollbar-track { background: transparent; }
+
+  .log-line {
+    color: var(--grey-300);
+    word-break: break-word;
+  }
+
+  .log-line .ts {
+    color: var(--grey-500);
+    margin-right: 10px;
+  }
+
+  .log-info { color: var(--white); }
+  .log-error { color: var(--grey-300); font-weight: 700; }
+  .log-error::before {
+    content: '';
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    background: var(--white);
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+</style>
 </head>
 <body>
   <div class="container">
-    <h1>Rexify Automation Dashboard</h1>
-    
-    <div class="card">
-      <form id="uploadForm">
-        <label style="display: block; margin-bottom: 8px; font-size: 0.9rem; color: #cbd5e1;">Upload CSV File (Bank Name & Account Number):</label>
-        <input type="file" id="csvFile" accept=".csv" class="file-input" required />
-        <button type="submit" id="startBtn">Start Automation</button>
-      </form>
+    <div class="header">
+      <div class="eyebrow">Rexify / Automation</div>
+      <h1>Automation control</h1>
     </div>
 
-    <div class="card">
-      <div style="margin-bottom: 8px; font-size: 0.85rem; color: #94a3b8; font-weight: bold;">LIVE CONSOLE OUTPUT</div>
+    <form id="uploadForm">
+      <label for="csvFile">
+        <div class="dropzone" id="dropzone">
+          <div class="plus-ring">
+            <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+          </div>
+          <div class="dz-title" id="dzTitle">Upload account details</div>
+          <div class="dz-sub" id="dzSub">CSV — bank name and account number</div>
+        </div>
+      </label>
+      <input type="file" id="csvFile" accept=".csv" required />
+      <button type="submit" id="startBtn">Start automation</button>
+    </form>
+
+    <div class="terminal-section">
+      <div class="terminal-label"><span class="dot"></span>Live output</div>
       <div class="terminal" id="terminal">
-        <div class="log-line log-info">> System ready. Upload your CSV file to begin automation...</div>
+        <div class="log-line log-info"><span class="ts">00:00:00</span>System ready. Upload a CSV to begin.</div>
       </div>
     </div>
   </div>
@@ -44,52 +245,83 @@
     const terminal = document.getElementById('terminal');
     const form = document.getElementById('uploadForm');
     const startBtn = document.getElementById('startBtn');
+    const dropzone = document.getElementById('dropzone');
+    const csvFile = document.getElementById('csvFile');
+    const dzTitle = document.getElementById('dzTitle');
+    const dzSub = document.getElementById('dzSub');
 
     function appendLog(text, type = '') {
       const line = document.createElement('div');
       line.className = 'log-line ' + (type ? `log-${type}` : '');
-      line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+      const ts = document.createElement('span');
+      ts.className = 'ts';
+      ts.textContent = new Date().toLocaleTimeString('en-GB');
+      line.appendChild(ts);
+      line.appendChild(document.createTextNode(text));
       terminal.appendChild(line);
       terminal.scrollTop = terminal.scrollHeight;
     }
 
-    const eventSource = new EventSource('/api/logs');
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      appendLog(data.message, data.type);
-      if (data.done) {
-        startBtn.disabled = false;
-        startBtn.textContent = 'Start Automation';
+    csvFile.addEventListener('change', () => {
+      if (csvFile.files[0]) {
+        dropzone.classList.add('has-file');
+        dzTitle.textContent = csvFile.files[0].name;
+        dzSub.textContent = 'Ready to upload';
       }
-    };
+    });
+
+    ['dragover', 'dragleave', 'drop'].forEach(evt => {
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        if (evt === 'dragover') dropzone.classList.add('dragover');
+        else dropzone.classList.remove('dragover');
+      });
+    });
+
+    dropzone.addEventListener('drop', (e) => {
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        csvFile.files = e.dataTransfer.files;
+        csvFile.dispatchEvent(new Event('change'));
+      }
+    });
+
+    let eventSource;
+    try {
+      eventSource = new EventSource('/api/logs');
+      eventSource.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        appendLog(data.message, data.type);
+        if (data.done) {
+          startBtn.disabled = false;
+          startBtn.textContent = 'Start automation';
+        }
+      };
+    } catch (e) {}
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const fileInput = document.getElementById('csvFile');
-      if (!fileInput.files[0]) return;
+      if (!csvFile.files[0]) return;
 
       const formData = new FormData();
-      formData.append('csvFile', fileInput.files[0]);
+      formData.append('csvFile', csvFile.files[0]);
 
       startBtn.disabled = true;
-      startBtn.textContent = 'Running Automation...';
-      appendLog('Uploading CSV file and kicking off task loop...', 'info');
+      startBtn.textContent = 'Running...';
+      appendLog('Uploading CSV and starting task loop...', 'info');
 
       try {
-        const response = await fetch('/api/start', {
-          method: 'POST',
-          body: formData
-        });
+        const response = await fetch('/api/start', { method: 'POST', body: formData });
         const result = await response.json();
         if (!result.success) {
           appendLog(`Error: ${result.error}`, 'error');
           startBtn.disabled = false;
-          startBtn.textContent = 'Start Automation';
+          startBtn.textContent = 'Start automation';
         }
       } catch (err) {
         appendLog(`Server connection error: ${err.message}`, 'error');
         startBtn.disabled = false;
-        startBtn.textContent = 'Start Automation';
+        startBtn.textContent = 'Start automation';
       }
     });
   </script>
