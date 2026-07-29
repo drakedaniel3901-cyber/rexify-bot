@@ -61,19 +61,31 @@
 
   form { display: block; }
 
+  .dropzone-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+
+  @media (max-width: 480px) {
+    .dropzone-grid { grid-template-columns: 1fr; }
+  }
+
   .dropzone {
     position: relative;
     border: 2px dashed var(--grey-700);
     border-radius: 16px;
-    height: 220px;
+    height: 190px;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     cursor: pointer;
     transition: border-color 0.15s ease, background 0.15s ease;
-    margin-bottom: 16px;
     background: var(--grey-950);
+    padding: 0 16px;
+    text-align: center;
   }
 
   .dropzone:hover, .dropzone.dragover {
@@ -88,14 +100,14 @@
   }
 
   .plus-ring {
-    width: 56px;
-    height: 56px;
+    width: 48px;
+    height: 48px;
     border-radius: 50%;
     border: 2px solid var(--grey-500);
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 18px;
+    margin-bottom: 16px;
     transition: border-color 0.15s ease, transform 0.15s ease;
   }
 
@@ -104,28 +116,43 @@
     transform: scale(1.06);
   }
 
-  .plus-ring svg { width: 22px; height: 22px; }
+  .plus-ring svg { width: 20px; height: 20px; }
 
   .dz-title {
-    font-size: 1rem;
+    font-size: 0.92rem;
     font-weight: 700;
     letter-spacing: -0.01em;
   }
 
   .dz-sub {
-    font-size: 0.8rem;
+    font-size: 0.74rem;
     font-weight: 500;
     color: var(--grey-500);
     margin-top: 6px;
   }
 
-  #csvFile { display: none; }
+  .dz-tag {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--grey-500);
+    position: absolute;
+    top: 14px;
+    left: 16px;
+  }
+
+  input[type="file"] { display: none; }
+
+  .btn-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
 
   button {
     width: 100%;
     padding: 16px;
-    background: var(--white);
-    color: var(--black);
     border: none;
     border-radius: 12px;
     font-family: inherit;
@@ -133,17 +160,41 @@
     font-weight: 800;
     letter-spacing: -0.01em;
     cursor: pointer;
-    transition: opacity 0.15s ease, transform 0.05s ease;
+    transition: opacity 0.15s ease, transform 0.05s ease, border-color 0.15s ease, color 0.15s ease;
   }
 
-  button:hover { opacity: 0.85; }
-  button:active { transform: scale(0.99); }
+  #startBtn {
+    background: var(--white);
+    color: var(--black);
+  }
 
-  button:disabled {
+  #startBtn:hover { opacity: 0.85; }
+  #startBtn:active { transform: scale(0.99); }
+
+  #startBtn:disabled {
     background: var(--grey-700);
     color: var(--grey-500);
     cursor: not-allowed;
     opacity: 1;
+  }
+
+  #stopBtn {
+    background: transparent;
+    color: var(--grey-500);
+    border: 1.5px solid var(--grey-700);
+  }
+
+  #stopBtn:hover:not(:disabled) {
+    color: var(--white);
+    border-color: var(--white);
+  }
+
+  #stopBtn:active:not(:disabled) { transform: scale(0.99); }
+
+  #stopBtn:disabled {
+    color: var(--grey-700);
+    border-color: var(--grey-800);
+    cursor: not-allowed;
   }
 
   .terminal-section {
@@ -217,20 +268,40 @@
     </div>
 
     <form id="uploadForm">
-      <label for="csvFile">
-        <div class="dropzone" id="dropzone">
-          <div class="plus-ring">
-            <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round">
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
+      <div class="dropzone-grid">
+        <label for="accountsFile">
+          <div class="dropzone" id="accountsZone">
+            <span class="dz-tag">accounts.csv</span>
+            <div class="plus-ring">
+              <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </div>
+            <div class="dz-title" id="accountsTitle">Upload account details</div>
+            <div class="dz-sub" id="accountsSub">Bank name and account number</div>
           </div>
-          <div class="dz-title" id="dzTitle">Upload account details</div>
-          <div class="dz-sub" id="dzSub">CSV — bank name and account number</div>
-        </div>
-      </label>
-      <input type="file" id="csvFile" accept=".csv" required />
-      <button type="submit" id="startBtn">Start automation</button>
+        </label>
+        <label for="urlsFile">
+          <div class="dropzone" id="urlsZone">
+            <span class="dz-tag">urls.csv</span>
+            <div class="plus-ring">
+              <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </div>
+            <div class="dz-title" id="urlsTitle">Upload target URLs</div>
+            <div class="dz-sub" id="urlsSub">One URL per row</div>
+          </div>
+        </label>
+      </div>
+      <input type="file" id="accountsFile" accept=".csv" required />
+      <input type="file" id="urlsFile" accept=".csv" required />
+      <div class="btn-row">
+        <button type="submit" id="startBtn">Start automation</button>
+        <button type="button" id="stopBtn" disabled>Stop</button>
+      </div>
     </form>
 
     <div class="terminal-section">
@@ -245,10 +316,7 @@
     const terminal = document.getElementById('terminal');
     const form = document.getElementById('uploadForm');
     const startBtn = document.getElementById('startBtn');
-    const dropzone = document.getElementById('dropzone');
-    const csvFile = document.getElementById('csvFile');
-    const dzTitle = document.getElementById('dzTitle');
-    const dzSub = document.getElementById('dzSub');
+    const stopBtn = document.getElementById('stopBtn');
 
     function appendLog(text, type = '') {
       const line = document.createElement('div');
@@ -262,29 +330,53 @@
       terminal.scrollTop = terminal.scrollHeight;
     }
 
-    csvFile.addEventListener('change', () => {
-      if (csvFile.files[0]) {
-        dropzone.classList.add('has-file');
-        dzTitle.textContent = csvFile.files[0].name;
-        dzSub.textContent = 'Ready to upload';
-      }
-    });
+    function wireDropzone({ zoneId, inputId, titleId, subId, readyLabel }) {
+      const zone = document.getElementById(zoneId);
+      const input = document.getElementById(inputId);
+      const title = document.getElementById(titleId);
+      const sub = document.getElementById(subId);
 
-    ['dragover', 'dragleave', 'drop'].forEach(evt => {
-      dropzone.addEventListener(evt, (e) => {
-        e.preventDefault();
-        if (evt === 'dragover') dropzone.classList.add('dragover');
-        else dropzone.classList.remove('dragover');
+      input.addEventListener('change', () => {
+        if (input.files[0]) {
+          zone.classList.add('has-file');
+          title.textContent = input.files[0].name;
+          sub.textContent = readyLabel;
+        }
       });
+
+      ['dragover', 'dragleave', 'drop'].forEach(evt => {
+        zone.addEventListener(evt, (e) => {
+          e.preventDefault();
+          if (evt === 'dragover') zone.classList.add('dragover');
+          else zone.classList.remove('dragover');
+        });
+      });
+
+      zone.addEventListener('drop', (e) => {
+        const file = e.dataTransfer.files[0];
+        if (file) {
+          input.files = e.dataTransfer.files;
+          input.dispatchEvent(new Event('change'));
+        }
+      });
+    }
+
+    wireDropzone({
+      zoneId: 'accountsZone', inputId: 'accountsFile',
+      titleId: 'accountsTitle', subId: 'accountsSub',
+      readyLabel: 'Ready to upload'
+    });
+    wireDropzone({
+      zoneId: 'urlsZone', inputId: 'urlsFile',
+      titleId: 'urlsTitle', subId: 'urlsSub',
+      readyLabel: 'Ready to upload'
     });
 
-    dropzone.addEventListener('drop', (e) => {
-      const file = e.dataTransfer.files[0];
-      if (file) {
-        csvFile.files = e.dataTransfer.files;
-        csvFile.dispatchEvent(new Event('change'));
-      }
-    });
+    function setRunningState(isRunning) {
+      startBtn.disabled = isRunning;
+      startBtn.textContent = isRunning ? 'Running...' : 'Start automation';
+      stopBtn.disabled = !isRunning;
+    }
 
     let eventSource;
     try {
@@ -292,36 +384,52 @@
       eventSource.onmessage = (event) => {
         const data = JSON.parse(event.data);
         appendLog(data.message, data.type);
-        if (data.done) {
-          startBtn.disabled = false;
-          startBtn.textContent = 'Start automation';
-        }
+        if (data.done) setRunningState(false);
       };
     } catch (e) {}
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      if (!csvFile.files[0]) return;
+      const accountsFile = document.getElementById('accountsFile');
+      const urlsFile = document.getElementById('urlsFile');
+      if (!accountsFile.files[0] || !urlsFile.files[0]) return;
 
       const formData = new FormData();
-      formData.append('csvFile', csvFile.files[0]);
+      formData.append('accountsFile', accountsFile.files[0]);
+      formData.append('urlsFile', urlsFile.files[0]);
 
-      startBtn.disabled = true;
-      startBtn.textContent = 'Running...';
-      appendLog('Uploading CSV and starting task loop...', 'info');
+      setRunningState(true);
+      appendLog('Uploading files and starting task loop...', 'info');
 
       try {
         const response = await fetch('/api/start', { method: 'POST', body: formData });
         const result = await response.json();
         if (!result.success) {
           appendLog(`Error: ${result.error}`, 'error');
-          startBtn.disabled = false;
-          startBtn.textContent = 'Start automation';
+          setRunningState(false);
         }
       } catch (err) {
         appendLog(`Server connection error: ${err.message}`, 'error');
-        startBtn.disabled = false;
-        startBtn.textContent = 'Start automation';
+        setRunningState(false);
+      }
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      stopBtn.textContent = 'Stopping...';
+      appendLog('Stop signal sent. Waiting for current task to finish...', 'info');
+
+      try {
+        const response = await fetch('/api/stop', { method: 'POST' });
+        const result = await response.json();
+        if (!result.success) {
+          appendLog(`Error: ${result.error}`, 'error');
+        }
+      } catch (err) {
+        appendLog(`Server connection error: ${err.message}`, 'error');
+      } finally {
+        stopBtn.textContent = 'Stop';
+        setRunningState(false);
       }
     });
   </script>
