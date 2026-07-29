@@ -18,6 +18,7 @@ const express = require('express');
 const multer = require('multer');
 const puppeteer = require('puppeteer');
 const { KnownDevices } = require('puppeteer');
+const Steel = require('steel-sdk');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -26,6 +27,11 @@ const PORT = process.env.PORT || 3000;
 const TARGET_URL = process.env.TARGET_URL || 'https://rexify.com.ng?reference=sholaupdates';
 
 const mobileDevice = KnownDevices['iPhone 13 Pro'];
+
+// Initialize Steel SDK Client
+const steel = new Steel({
+  apiKey: process.env.STEEL_API_KEY,
+});
 
 // 3. Global CORS Middleware
 app.use((req, res, next) => {
@@ -114,28 +120,7 @@ function parseCSVBuffer(buffer) {
   });
 }
 
-// 5. Browser Instance Manager
-let browserInstance = null;
-
-async function getBrowser() {
-  if (browserInstance && browserInstance.isConnected()) {
-    return browserInstance;
-  }
-
-  sendLog('Establishing Browserless WebSocket connection...', 'info');
-  browserInstance = await puppeteer.connect({
-    browserWSEndpoint: process.env.BROWSERLESS_WS,
-  });
-
-  browserInstance.on('disconnected', () => {
-    sendLog('Browserless connection dropped. Reconnect queued...', 'error');
-    browserInstance = null;
-  });
-
-  return browserInstance;
-}
-
-// Single Account Creation Handler
+// Single Account Creation Handler with Steel Session Integration
 async function processAccount(row, rowIndex, workerId) {
   const bankName = row.bankName || 'OPay';
   const accountNumber = row.accountNumber || row.account || Object.values(row)[0];
@@ -144,11 +129,23 @@ async function processAccount(row, rowIndex, workerId) {
   const randomPassword = generateRandomPassword();
   sendLog(`[Worker ${workerId}] [Row ${rowIndex + 1}] Processing ${accountNumber} (${randomEmail})`, 'info');
 
-  let context = null;
+  let session = null;
+  let browser = null;
+
   try {
-    const browser = await getBrowser();
-    context = await browser.createBrowserContext();
-    let page = await context.newPage();
+    // 1. Create Steel Session
+    session = await steel.sessions.create({
+      useProxy: true,
+      solveCaptcha: true,
+    });
+
+    // 2. Connect Puppeteer to Steel Session
+    browser = await puppeteer.connect({
+      browserWSEndpoint: `${session.websocketUrl}&apiKey=${process.env.STEEL_API_KEY}`,
+    });
+
+    const openPages = await browser.pages();
+    let page = openPages.length > 0 ? openPages[0] : await browser.newPage();
 
     await page.emulate(mobileDevice);
     page.setDefaultTimeout(25000);
@@ -164,7 +161,7 @@ async function processAccount(row, rowIndex, workerId) {
       page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {})
     ]);
 
-    const pages = await context.pages();
+    const pages = await browser.pages();
     if (pages.length > 1) {
       page = pages[pages.length - 1];
       await page.emulate(mobileDevice);
@@ -285,13 +282,16 @@ async function processAccount(row, rowIndex, workerId) {
     sendLog(`[Worker ${workerId}] Error on account ${accountNumber}: ${err.message}`, 'error');
     return false;
   } finally {
-    if (context) {
-      await context.close().catch(() => {});
+    if (browser) {
+      await browser.disconnect().catch(() => {});
+    }
+    if (session) {
+      await steel.sessions.release(session.id).catch(() => {});
     }
   }
 }
 
-// 6. Main Runner with Concurrency = 5 and Auto-Stop at 20 Successes
+// 5. Main Runner with Concurrency = 5 and Auto-Stop at 20 Successes
 app.post('/api/start', upload.single('csvFile'), async (req, res) => {
   try {
     if (!req.file) {
@@ -307,8 +307,8 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
 
     sendLog(`Loaded ${accountRows.length} account row(s). Starting execution pool...`, 'info');
 
-    if (!process.env.BROWSERLESS_WS) {
-      sendLog('ERROR: BROWSERLESS_WS environment variable is missing!', 'error', true);
+    if (!process.env.STEEL_API_KEY) {
+      sendLog('ERROR: STEEL_API_KEY environment variable is missing!', 'error', true);
       return;
     }
 
@@ -348,11 +348,6 @@ app.post('/api/start', upload.single('csvFile'), async (req, res) => {
       await Promise.all(workers);
 
       sendLog(`Execution batch completed. Total successes: ${globalSuccesses}/${TARGET_SUCCESSES}`, 'info', true);
-
-      if (browserInstance) {
-        await browserInstance.disconnect().catch(() => {});
-        browserInstance = null;
-      }
     })();
 
   } catch (err) {
