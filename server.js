@@ -133,11 +133,8 @@ async function processAccount(row, rowIndex, workerId) {
   let browser = null;
 
   try {
-    // 1. Create Steel Session
-    session = await steel.sessions.create({
-      useProxy: true,
-      solveCaptcha: true,
-    });
+    // 1. Create Steel Session (Free Tier Compatible - proxy & captcha omitted)
+    session = await steel.sessions.create({});
 
     // 2. Connect Puppeteer to Steel Session
     browser = await puppeteer.connect({
