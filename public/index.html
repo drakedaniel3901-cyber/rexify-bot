@@ -61,22 +61,91 @@
 
   form { display: block; }
 
-  .dropzone-grid {
+  /* ── Mode selector row ── */
+  .mode-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 14px;
-    margin-bottom: 16px;
+    margin-bottom: 20px;
   }
 
   @media (max-width: 480px) {
-    .dropzone-grid { grid-template-columns: 1fr; }
+    .mode-grid { grid-template-columns: 1fr; }
   }
 
+  .select-wrap { display: flex; flex-direction: column; gap: 8px; }
+
+  .select-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--grey-500);
+  }
+
+  .custom-select {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
+  .custom-select select {
+    width: 100%;
+    appearance: none;
+    -webkit-appearance: none;
+    background: var(--grey-950);
+    border: 1.5px solid var(--grey-700);
+    border-radius: 10px;
+    color: var(--white);
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    padding: 13px 40px 13px 14px;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+    outline: none;
+  }
+
+  .custom-select select:hover,
+  .custom-select select:focus { border-color: var(--white); }
+
+  .custom-select select option {
+    background: var(--grey-900);
+    color: var(--white);
+  }
+
+  .custom-select .chevron {
+    position: absolute;
+    right: 13px;
+    pointer-events: none;
+    color: var(--grey-500);
+    display: flex;
+    align-items: center;
+  }
+
+  .custom-select .chevron svg { width: 15px; height: 15px; }
+
+  /* ── Conditional panels ── */
+  .panel {
+    overflow: hidden;
+    max-height: 0;
+    opacity: 0;
+    transition: max-height 0.3s ease, opacity 0.25s ease, margin-bottom 0.3s ease;
+    margin-bottom: 0;
+  }
+
+  .panel.visible {
+    max-height: 300px;
+    opacity: 1;
+    margin-bottom: 16px;
+  }
+
+  /* ── Dropzone ── */
   .dropzone {
     position: relative;
     border: 2px dashed var(--grey-700);
     border-radius: 16px;
-    height: 190px;
+    height: 180px;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -100,14 +169,14 @@
   }
 
   .plus-ring {
-    width: 48px;
-    height: 48px;
+    width: 44px;
+    height: 44px;
     border-radius: 50%;
     border: 2px solid var(--grey-500);
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-bottom: 16px;
+    margin-bottom: 14px;
     transition: border-color 0.15s ease, transform 0.15s ease;
   }
 
@@ -116,43 +185,72 @@
     transform: scale(1.06);
   }
 
-  .plus-ring svg { width: 20px; height: 20px; }
+  .plus-ring svg { width: 18px; height: 18px; }
 
   .dz-title {
-    font-size: 0.92rem;
+    font-size: 0.9rem;
     font-weight: 700;
     letter-spacing: -0.01em;
   }
 
   .dz-sub {
-    font-size: 0.74rem;
+    font-size: 0.73rem;
     font-weight: 500;
     color: var(--grey-500);
-    margin-top: 6px;
+    margin-top: 5px;
   }
 
   .dz-tag {
-    font-size: 0.68rem;
+    font-size: 0.67rem;
     font-weight: 700;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.09em;
     text-transform: uppercase;
     color: var(--grey-500);
     position: absolute;
-    top: 14px;
-    left: 16px;
+    top: 13px;
+    left: 15px;
   }
 
   input[type="file"] { display: none; }
 
+  /* ── Auto-gen URL fields ── */
+  .autogen-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .field-input {
+    width: 100%;
+    background: var(--grey-950);
+    border: 1.5px solid var(--grey-700);
+    border-radius: 10px;
+    color: var(--white);
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 500;
+    padding: 14px 16px;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+
+  .field-input::placeholder { color: var(--grey-500); }
+  .field-input:focus { border-color: var(--white); }
+
+  /* hide number arrows */
+  .field-input[type="number"]::-webkit-inner-spin-button,
+  .field-input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+  .field-input[type="number"] { -moz-appearance: textfield; }
+
+  /* ── Buttons ── */
   .btn-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr auto;
     gap: 12px;
   }
 
   button {
-    width: 100%;
-    padding: 16px;
+    padding: 15px 24px;
     border: none;
     border-radius: 12px;
     font-family: inherit;
@@ -164,6 +262,7 @@
   }
 
   #startBtn {
+    width: 100%;
     background: var(--white);
     color: var(--black);
   }
@@ -182,6 +281,8 @@
     background: transparent;
     color: var(--grey-500);
     border: 1.5px solid var(--grey-700);
+    white-space: nowrap;
+    min-width: 90px;
   }
 
   #stopBtn:hover:not(:disabled) {
@@ -268,7 +369,41 @@
     </div>
 
     <form id="uploadForm">
-      <div class="dropzone-grid">
+
+      <!-- Mode selectors -->
+      <div class="mode-grid">
+        <div class="select-wrap">
+          <span class="select-label">Account source</span>
+          <div class="custom-select">
+            <select id="accountMode">
+              <option value="auto">Automatic account</option>
+              <option value="manual">Manual upload</option>
+            </select>
+            <span class="chevron">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </span>
+          </div>
+        </div>
+        <div class="select-wrap">
+          <span class="select-label">URL source</span>
+          <div class="custom-select">
+            <select id="urlMode">
+              <option value="autogen">Auto-gen URL</option>
+              <option value="manual">Manual upload</option>
+            </select>
+            <span class="chevron">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Account manual upload panel -->
+      <div class="panel" id="accountPanel">
         <label for="accountsFile">
           <div class="dropzone" id="accountsZone">
             <span class="dz-tag">accounts.csv</span>
@@ -282,6 +417,10 @@
             <div class="dz-sub" id="accountsSub">Bank name and account number</div>
           </div>
         </label>
+      </div>
+
+      <!-- URL manual upload panel -->
+      <div class="panel" id="urlManualPanel">
         <label for="urlsFile">
           <div class="dropzone" id="urlsZone">
             <span class="dz-tag">urls.csv</span>
@@ -296,8 +435,19 @@
           </div>
         </label>
       </div>
-      <input type="file" id="accountsFile" accept=".csv" required />
-      <input type="file" id="urlsFile" accept=".csv" required />
+
+      <!-- URL auto-gen fields panel -->
+      <div class="panel visible" id="urlAutoPanel">
+        <div class="autogen-fields">
+          <input type="url" id="targetUrl" class="field-input" placeholder="Target URL  e.g. https://example.com" />
+          <input type="number" id="urlCount" class="field-input" placeholder="Number of target URL accounts" min="1" />
+        </div>
+      </div>
+
+      <!-- Hidden file inputs -->
+      <input type="file" id="accountsFile" accept=".csv" />
+      <input type="file" id="urlsFile" accept=".csv" />
+
       <div class="btn-row">
         <button type="submit" id="startBtn">Start automation</button>
         <button type="button" id="stopBtn" disabled>Stop</button>
@@ -313,11 +463,18 @@
   </div>
 
   <script>
-    const terminal = document.getElementById('terminal');
-    const form = document.getElementById('uploadForm');
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
+    const terminal   = document.getElementById('terminal');
+    const form       = document.getElementById('uploadForm');
+    const startBtn   = document.getElementById('startBtn');
+    const stopBtn    = document.getElementById('stopBtn');
 
+    const accountMode     = document.getElementById('accountMode');
+    const urlMode         = document.getElementById('urlMode');
+    const accountPanel    = document.getElementById('accountPanel');
+    const urlManualPanel  = document.getElementById('urlManualPanel');
+    const urlAutoPanel    = document.getElementById('urlAutoPanel');
+
+    // ── Logging ──────────────────────────────────────────────
     function appendLog(text, type = '') {
       const line = document.createElement('div');
       line.className = 'log-line ' + (type ? `log-${type}` : '');
@@ -330,25 +487,25 @@
       terminal.scrollTop = terminal.scrollHeight;
     }
 
-    function wireDropzone({ zoneId, inputId, titleId, subId, readyLabel }) {
-      const zone = document.getElementById(zoneId);
+    // ── Dropzone wiring ───────────────────────────────────────
+    function wireDropzone({ zoneId, inputId, titleId, subId }) {
+      const zone  = document.getElementById(zoneId);
       const input = document.getElementById(inputId);
       const title = document.getElementById(titleId);
-      const sub = document.getElementById(subId);
+      const sub   = document.getElementById(subId);
 
       input.addEventListener('change', () => {
         if (input.files[0]) {
           zone.classList.add('has-file');
           title.textContent = input.files[0].name;
-          sub.textContent = readyLabel;
+          sub.textContent   = 'Ready to upload';
         }
       });
 
       ['dragover', 'dragleave', 'drop'].forEach(evt => {
         zone.addEventListener(evt, (e) => {
           e.preventDefault();
-          if (evt === 'dragover') zone.classList.add('dragover');
-          else zone.classList.remove('dragover');
+          zone.classList.toggle('dragover', evt === 'dragover');
         });
       });
 
@@ -361,26 +518,33 @@
       });
     }
 
-    wireDropzone({
-      zoneId: 'accountsZone', inputId: 'accountsFile',
-      titleId: 'accountsTitle', subId: 'accountsSub',
-      readyLabel: 'Ready to upload'
-    });
-    wireDropzone({
-      zoneId: 'urlsZone', inputId: 'urlsFile',
-      titleId: 'urlsTitle', subId: 'urlsSub',
-      readyLabel: 'Ready to upload'
-    });
+    wireDropzone({ zoneId: 'accountsZone', inputId: 'accountsFile', titleId: 'accountsTitle', subId: 'accountsSub' });
+    wireDropzone({ zoneId: 'urlsZone',     inputId: 'urlsFile',     titleId: 'urlsTitle',     subId: 'urlsSub'     });
 
-    function setRunningState(isRunning) {
-      startBtn.disabled = isRunning;
-      startBtn.textContent = isRunning ? 'Running...' : 'Start automation';
-      stopBtn.disabled = !isRunning;
+    // ── Mode switching ────────────────────────────────────────
+    function applyModes() {
+      const aMode = accountMode.value;
+      const uMode = urlMode.value;
+
+      accountPanel.classList.toggle('visible', aMode === 'manual');
+      urlManualPanel.classList.toggle('visible', uMode === 'manual');
+      urlAutoPanel.classList.toggle('visible', uMode === 'autogen');
     }
 
-    let eventSource;
+    accountMode.addEventListener('change', applyModes);
+    urlMode.addEventListener('change', applyModes);
+    applyModes(); // run on load
+
+    // ── Running state ─────────────────────────────────────────
+    function setRunningState(isRunning) {
+      startBtn.disabled    = isRunning;
+      startBtn.textContent = isRunning ? 'Running...' : 'Start automation';
+      stopBtn.disabled     = !isRunning;
+    }
+
+    // ── SSE log stream ────────────────────────────────────────
     try {
-      eventSource = new EventSource('/api/logs');
+      const eventSource = new EventSource('/api/logs');
       eventSource.onmessage = (event) => {
         const data = JSON.parse(event.data);
         appendLog(data.message, data.type);
@@ -388,22 +552,48 @@
       };
     } catch (e) {}
 
+    // ── Form submit ───────────────────────────────────────────
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const accountsFile = document.getElementById('accountsFile');
-      const urlsFile = document.getElementById('urlsFile');
-      if (!accountsFile.files[0] || !urlsFile.files[0]) return;
+
+      const aMode = accountMode.value;
+      const uMode = urlMode.value;
+
+      // Validate conditional required fields
+      if (aMode === 'manual' && !document.getElementById('accountsFile').files[0]) {
+        appendLog('Please upload an accounts.csv file.', 'error'); return;
+      }
+      if (uMode === 'manual' && !document.getElementById('urlsFile').files[0]) {
+        appendLog('Please upload a urls.csv file.', 'error'); return;
+      }
+      if (uMode === 'autogen') {
+        const url   = document.getElementById('targetUrl').value.trim();
+        const count = document.getElementById('urlCount').value.trim();
+        if (!url)   { appendLog('Please enter a target URL.', 'error'); return; }
+        if (!count) { appendLog('Please enter the number of target URL accounts.', 'error'); return; }
+      }
 
       const formData = new FormData();
-      formData.append('accountsFile', accountsFile.files[0]);
-      formData.append('urlsFile', urlsFile.files[0]);
+      formData.append('accountMode', aMode);
+      formData.append('urlMode', uMode);
+
+      if (aMode === 'manual') {
+        formData.append('accountsFile', document.getElementById('accountsFile').files[0]);
+      }
+      if (uMode === 'manual') {
+        formData.append('urlsFile', document.getElementById('urlsFile').files[0]);
+      }
+      if (uMode === 'autogen') {
+        formData.append('targetUrl', document.getElementById('targetUrl').value.trim());
+        formData.append('urlCount',  document.getElementById('urlCount').value.trim());
+      }
 
       setRunningState(true);
-      appendLog('Uploading files and starting task loop...', 'info');
+      appendLog(`Starting — account: ${aMode}, url: ${uMode}`, 'info');
 
       try {
         const response = await fetch('/api/start', { method: 'POST', body: formData });
-        const result = await response.json();
+        const result   = await response.json();
         if (!result.success) {
           appendLog(`Error: ${result.error}`, 'error');
           setRunningState(false);
@@ -414,17 +604,16 @@
       }
     });
 
+    // ── Stop ──────────────────────────────────────────────────
     stopBtn.addEventListener('click', async () => {
-      stopBtn.disabled = true;
-      stopBtn.textContent = 'Stopping...';
+      stopBtn.disabled     = true;
+      stopBtn.textContent  = 'Stopping...';
       appendLog('Stop signal sent. Waiting for current task to finish...', 'info');
 
       try {
         const response = await fetch('/api/stop', { method: 'POST' });
-        const result = await response.json();
-        if (!result.success) {
-          appendLog(`Error: ${result.error}`, 'error');
-        }
+        const result   = await response.json();
+        if (!result.success) appendLog(`Error: ${result.error}`, 'error');
       } catch (err) {
         appendLog(`Server connection error: ${err.message}`, 'error');
       } finally {
@@ -433,22 +622,22 @@
       }
     });
 
-    // Sync UI state on page load/refresh
+    // ── Status sync on page load/refresh ─────────────────────
     async function syncServerStatus() {
       try {
-        const res = await fetch('/api/status');
+        const res  = await fetch('/api/status');
         const data = await res.json();
 
         if (data.isRunning) {
-          startBtn.disabled = true;
+          startBtn.disabled    = true;
           startBtn.textContent = 'Running...';
-          stopBtn.disabled = data.isStopping; // keep enabled unless already stopping
-          stopBtn.textContent = data.isStopping ? 'Stopping...' : 'Stop';
+          stopBtn.disabled     = data.isStopping;
+          stopBtn.textContent  = data.isStopping ? 'Stopping...' : 'Stop';
         } else {
-          startBtn.disabled = false;
+          startBtn.disabled    = false;
           startBtn.textContent = 'Start automation';
-          stopBtn.disabled = true;
-          stopBtn.textContent = 'Stop';
+          stopBtn.disabled     = true;
+          stopBtn.textContent  = 'Stop';
         }
       } catch (err) {
         console.error('Failed to sync status:', err);
