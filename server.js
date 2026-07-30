@@ -78,12 +78,12 @@ function generateRandomPassword() {
   return `Pass!${Math.random().toString(36).slice(-8)}`;
 }
 
-// Telecom generator for Auto Account Mode (OPay & Moniepoint friendly prefixes)
+// Telecom generator for Auto Account Mode (OPay friendly prefixes)
 function generateAccountNumber() {
   const prefixes = [
-    '8067', '8034', '9043', '8167', '7035', // Original
-    '9067', '8178', '9053', '70648', '90397', // Added
-    '903467', '90333', '902750', '81495', '81424', '808188' // Added
+    '8067', '8034', '9043', '8167', '7035', 
+    '9067', '8178', '9053', '70648', '90397', 
+    '903467', '90333', '902750', '81495', '81424', '808188'
   ];
   const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
   
@@ -182,14 +182,13 @@ app.get('/api/download-accounts', (req, res) => {
 
 
 // ============================================================================
-// START AUTOMATION (MAPPED TO YOUR HTML FORM FIELDS)
+// START AUTOMATION
 // ============================================================================
 
 app.post('/api/start', uploadMiddleware, async (req, res) => {
   try {
     if (isRunning) return res.status(400).json({ success: false, error: 'Process is already running!' });
 
-    // Matches names sent by your HTML form: accountMode, urlMode, targetUrl, urlCount
     const { accountMode, urlMode, targetUrl, urlCount } = req.body;
 
     let accountRows = [];
@@ -249,7 +248,7 @@ app.post('/api/start', uploadMiddleware, async (req, res) => {
 async function runHybridEngine(config) {
   const { accountMode, urlMode, accountRows, targetUrls, targetUrl, urlCount } = config;
   const CONCURRENCY = 7;
-  const SUCCESSES_NEEDED = 20; // 20 fodder accounts per seed
+  const SUCCESSES_NEEDED = 20;
 
   sendLog(`\n🚀 HYBRID ENGINE STARTED | URL Mode: ${urlMode.toUpperCase()} | Account Mode: ${accountMode.toUpperCase()}`, 'info');
 
@@ -293,7 +292,7 @@ async function runHybridEngine(config) {
   } 
   // PATH B: AUTO-GEN URLS (Self-Feeding Seed & Fodder Farm)
   else if (urlMode === 'autogen') {
-    const urlPrefix = 'rexifyuseruhuyr';
+    const urlPrefix = 'drakedan';
     const urlDomain = '@gmail.com';
 
     for (let cycle = 1; cycle <= urlCount; cycle++) {
@@ -341,7 +340,7 @@ async function runHybridEngine(config) {
   isStopping = false;
 }
 
-// Account Processing Worker with Bank Rotation (OPay 1-2, Moniepoint 3-4)
+// Account Processing Worker (OPay Only - Max 2 Verification Attempts)
 async function processAccount(accountData, rowIndex, workerId, targetUrl, customEmail = null, customPassword = null) {
   const accountNumber = accountData.accountNumber;
   const randomEmail = customEmail || generateRandomEmail();
@@ -382,15 +381,15 @@ async function processAccount(accountData, rowIndex, workerId, targetUrl, custom
     await Promise.all([ continueBtn.click(), page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}) ]);
     await randomDelay(3000, 5000);
 
-    // STEP 3: Verification with Bank Rotation (OPay 1-2, Moniepoint 3-4)
+    // STEP 3: Verification (OPay Only - Max 2 Attempts)
     let isVerified = false, verifyAttempt = 0;
-    const MAX_VERIFY_ATTEMPTS = 4;
+    const MAX_VERIFY_ATTEMPTS = 2;
+    const currentBank = 'OPay';
 
     while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
       if (isStopping) throw new Error('Process forcefully stopped.');
       verifyAttempt++;
-      
-      const currentBank = verifyAttempt <= 2 ? 'OPay' : 'Moniepoint';
+
       sendLog(`[Worker ${workerId}] Verification ${verifyAttempt}/${MAX_VERIFY_ATTEMPTS} using ${currentBank}...`);
 
       const accountInput = await page.waitForSelector('input[placeholder*="account number" i]', { visible: true, timeout: 15000 });
@@ -440,7 +439,7 @@ async function processAccount(accountData, rowIndex, workerId, targetUrl, custom
       }
     }
 
-    if (!isVerified) throw new Error(`Failed account verification.`);
+    if (!isVerified) throw new Error(`Failed account verification after ${MAX_VERIFY_ATTEMPTS} attempts.`);
     
     const finishBtn = await page.waitForSelector('text/Finish & continue', { visible: true, timeout: 15000 });
     await randomDelay(800, 1500);
