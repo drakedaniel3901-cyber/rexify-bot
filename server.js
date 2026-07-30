@@ -80,9 +80,20 @@ function generateRandomPassword() {
 
 // Telecom generator for Auto Account Mode (OPay & Moniepoint friendly prefixes)
 function generateAccountNumber() {
-  const prefixes = ['8067', '8034', '9043', '8167', '7035'];
+  const prefixes = [
+    '8067', '8034', '9043', '8167', '7035', // Original
+    '9067', '8178', '9053', '70648', '90397', // Added
+    '903467', '90333', '902750', '81495', '81424', '808188' // Added
+  ];
   const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-  const suffix = Math.floor(100000 + Math.random() * 900000).toString();
+  
+  // Dynamically pad to ensure a 10-digit NUBAN
+  const remainingLength = 10 - prefix.length;
+  let suffix = '';
+  for (let i = 0; i < remainingLength; i++) {
+    suffix += Math.floor(Math.random() * 10).toString();
+  }
+  
   return prefix + suffix; 
 }
 
@@ -282,7 +293,7 @@ async function runHybridEngine(config) {
   } 
   // PATH B: AUTO-GEN URLS (Self-Feeding Seed & Fodder Farm)
   else if (urlMode === 'autogen') {
-    const urlPrefix = 'rexifyuseruyr';
+    const urlPrefix = 'rexifyuseruhuyr';
     const urlDomain = '@gmail.com';
 
     for (let cycle = 1; cycle <= urlCount; cycle++) {
@@ -330,7 +341,7 @@ async function runHybridEngine(config) {
   isStopping = false;
 }
 
-// Account Processing Worker with Bank Rotation (OPay 1-4, Moniepoint 5-7)
+// Account Processing Worker with Bank Rotation (OPay 1-2, Moniepoint 3-4)
 async function processAccount(accountData, rowIndex, workerId, targetUrl, customEmail = null, customPassword = null) {
   const accountNumber = accountData.accountNumber;
   const randomEmail = customEmail || generateRandomEmail();
@@ -371,15 +382,15 @@ async function processAccount(accountData, rowIndex, workerId, targetUrl, custom
     await Promise.all([ continueBtn.click(), page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}) ]);
     await randomDelay(3000, 5000);
 
-    // STEP 3: Verification with Bank Rotation (OPay 1-4, Moniepoint 5-7)
+    // STEP 3: Verification with Bank Rotation (OPay 1-2, Moniepoint 3-4)
     let isVerified = false, verifyAttempt = 0;
-    const MAX_VERIFY_ATTEMPTS = 7;
+    const MAX_VERIFY_ATTEMPTS = 4;
 
     while (!isVerified && verifyAttempt < MAX_VERIFY_ATTEMPTS) {
       if (isStopping) throw new Error('Process forcefully stopped.');
       verifyAttempt++;
       
-      const currentBank = verifyAttempt <= 4 ? 'OPay' : 'Moniepoint';
+      const currentBank = verifyAttempt <= 2 ? 'OPay' : 'Moniepoint';
       sendLog(`[Worker ${workerId}] Verification ${verifyAttempt}/${MAX_VERIFY_ATTEMPTS} using ${currentBank}...`);
 
       const accountInput = await page.waitForSelector('input[placeholder*="account number" i]', { visible: true, timeout: 15000 });
